@@ -540,6 +540,55 @@ python3 scripts/model_eval_db.py assess-item \
   --evaluation "SQL context included -F examples, but the model still missed the alias."
 ```
 
+### 自动 Review Watcher
+
+PR-Daemon 的 24 小时循环由独立 watcher 脚本负责，Codex 负责被 watcher 启动后执行一次具体 review。推荐结构：
+
+- `scripts/review_watch.py`：独立 daemon，读取 `~/.config/prbot/repos.conf`，扫描所有 open PR，写入 `reviews/pr-watch.sqlite`，检测新 PR、head 变化、review 状态变化，并生成 Codex prompt。
+- `codex exec`：每次只处理一个 PR，使用 `$rapid-mlx-review`、本地模型、Codex 复核、GitHub review posting、SQLite/Markdown 记录。
+- `scripts/start_review_watch.sh`：后台启动 watcher，默认只生成 prompt，不自动发 review。
+
+默认安全模式：
+
+```bash
+scripts/start_review_watch.sh
+```
+
+Canary 自动 review 模式，一次循环最多处理 1 个 PR：
+
+```bash
+PR_DAEMON_AUTO_REVIEW=1 \
+PR_DAEMON_MAX_REVIEWS_PER_CYCLE=1 \
+scripts/start_review_watch.sh
+```
+
+dry-run 自动 review，只打印将启动的 Codex 命令：
+
+```bash
+PR_DAEMON_AUTO_REVIEW=1 \
+PR_DAEMON_DRY_RUN=1 \
+scripts/start_review_watch.sh
+```
+
+一次性扫描并生成 prompt：
+
+```bash
+python3 scripts/review_watch.py --max-reviews-per-cycle 3
+```
+
+loop 的职责边界：
+
+- watcher 不直接决定 approve/request changes，只负责发现 PR 和启动 Codex。
+- Codex 每次 review 必须发 GitHub review/comment，并更新本地 SQL/Markdown。
+- watcher 看到同一个 PR head 变化后会再次入队，适合“被修复后自动复审”。
+- PR merged/closed 后，GitHub 仓库设置 `delete_branch_on_merge=true` 会自动删远端 head branch；PR-Daemon 后续只做本地 stale branch cleanup/fallback。
+
+GitHub merged branch 自动删除：
+
+- prbot 配置范围内 71 个 repo 已检查。
+- 69 个 active repo 已开启或原本已开启 `delete_branch_on_merge`。
+- 2 个 archived repo 无法修改：`AAStarCommunity/Adapters`、`AAStarCommunity/Gateway`。
+
 ### Review 完成契约
 
 每次 PR review 必须满足三个条件才算完成：
@@ -1091,6 +1140,38 @@ Improvement is effective only when observable quality improves:
 - Correct execution of carried-forward improvement items.
 - Fewer Codex-only blockers.
 - Faster final GitHub review with less rework.
+
+### Automatic Review Watcher
+
+The 24-hour loop is owned by an independent watcher script. Codex is launched by the watcher for one concrete PR review at a time:
+
+- `scripts/review_watch.py`: reads `~/.config/prbot/repos.conf`, scans all open PRs, records them in `reviews/pr-watch.sqlite`, detects new PRs and head changes, and generates Codex prompts.
+- `codex exec`: performs one review with `$rapid-mlx-review`, local model broad pass, Codex verification, GitHub review posting, and SQLite/Markdown record updates.
+- `scripts/start_review_watch.sh`: starts the watcher in the background. Default mode only generates prompts and does not auto-review.
+
+Safe monitor mode:
+
+```bash
+scripts/start_review_watch.sh
+```
+
+Canary auto-review mode:
+
+```bash
+PR_DAEMON_AUTO_REVIEW=1 \
+PR_DAEMON_MAX_REVIEWS_PER_CYCLE=1 \
+scripts/start_review_watch.sh
+```
+
+Dry-run auto-review mode:
+
+```bash
+PR_DAEMON_AUTO_REVIEW=1 \
+PR_DAEMON_DRY_RUN=1 \
+scripts/start_review_watch.sh
+```
+
+The watcher does not decide approval itself. It only queues work. Codex must post the GitHub review/comment and update local records. When a PR head changes, the watcher queues it again for re-review. After merge, GitHub's `delete_branch_on_merge=true` setting should delete the remote head branch; PR-Daemon can later add local stale branch cleanup as a fallback.
 
 ### Review Completion Contract
 
