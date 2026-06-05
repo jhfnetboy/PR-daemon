@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import textwrap
@@ -15,7 +16,74 @@ import urllib.request
 from pathlib import Path
 
 
-SYSTEM_PROMPT = """You are a strict code reviewer. Report only findings that can plausibly cause bugs, regressions, security problems, performance problems, or meaningful missing tests. For each finding include severity, file/function clue, evidence, and a concrete fix. Avoid style-only advice, praise, broad refactors, and unsupported guesses. If there are no issues, say so."""
+SYSTEM_PROMPT = """You are a strict code reviewer. Report only findings that can plausibly cause bugs, regressions, security problems, performance problems, or meaningful missing tests. For each finding include severity, file/function clue, evidence, and a concrete fix. Avoid style-only advice, praise, broad refactors, and unsupported guesses.
+
+Output contract:
+- Do not include chain-of-thought, thinking process, analysis transcript, or step-by-step reasoning.
+- Return concise review findings only.
+- If prior review findings or improvement items are provided, explicitly verify whether each was fixed.
+- For security gate reviews with adversarial examples, include a compact truth table: example, matched/missed, reason.
+- If there are no issues, say so."""
+
+
+def load_prior_eval_context(db_path: str, owner: str, repo_name: str, pr_number: str) -> str:
+    if not db_path or not owner or not repo_name or not pr_number:
+        return ""
+    path = Path(db_path).expanduser()
+    if not path.exists():
+        return ""
+
+    try:
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT improvement_text, status, evaluation
+            FROM model_improvement_items
+            WHERE owner = ? AND repo = ? AND pr_number = ?
+            ORDER BY id DESC
+            LIMIT 12
+            """,
+            (owner, repo_name, int(pr_number)),
+        ).fetchall()
+        run_rows = conn.execute(
+            """
+            SELECT created_at, score, prior_improvement_evaluation, next_prompt_improvements
+            FROM model_review_runs
+            WHERE owner = ? AND repo = ? AND pr_number = ?
+            ORDER BY id DESC
+            LIMIT 3
+            """,
+            (owner, repo_name, int(pr_number)),
+        ).fetchall()
+    except sqlite3.Error as exc:
+        return f"Prior model-eval SQL context unavailable: {exc}"
+    finally:
+        try:
+            conn.close()
+        except UnboundLocalError:
+            pass
+
+    if not rows and not run_rows:
+        return ""
+
+    lines = ["Prior local-model evaluation context from SQLite:"]
+    if run_rows:
+        lines.append("Recent run evaluations:")
+        for row in run_rows:
+            lines.append(
+                f"- {row['created_at']}: score={row['score']}; "
+                f"prior_improvement_evaluation={row['prior_improvement_evaluation'] or 'n/a'}; "
+                f"next_prompt_improvements={row['next_prompt_improvements'] or 'n/a'}"
+            )
+    if rows:
+        lines.append("Improvement items to apply or re-check:")
+        for row in rows:
+            lines.append(
+                f"- [{row['status']}] {row['improvement_text']} "
+                f"(evaluation: {row['evaluation'] or 'not evaluated yet'})"
+            )
+    return "\n".join(lines)
 
 
 def run_git(repo: Path, args: list[str]) -> str:
@@ -114,23 +182,42 @@ def post_chat(base_url: str, model: str, messages: list[dict[str, str]], max_tok
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run Rapid-MLX first-pass review on a git diff.")
     parser.add_argument("--repo", default=".", help="Repository path")
+    parser.add_argument("--diff-file", default="", help="Review this diff file instead of generating a git diff")
+    parser.add_argument("--context-file", action="append", default=[], help="Additional review context, prior findings, or adversarial cases")
     parser.add_argument("--base", default="origin/main", help="Base ref for review")
     parser.add_argument("--target", default="HEAD", help="Target ref for review")
     parser.add_argument("--worktree", action="store_true", help="Include staged and unstaged worktree changes")
     parser.add_argument("--base-url", default=os.environ.get("RAPID_MLX_BASE_URL", "http://localhost:8000/v1"))
-    parser.add_argument("--model", default=os.environ.get("RAPID_MLX_MODEL", "default"))
+    parser.add_argument("--model", default=os.environ.get("RAPID_MLX_MODEL", "qwen3.6-a3b"))
     parser.add_argument("--max-chars", type=int, default=45000, help="Approximate max diff chars per chunk")
     parser.add_argument("--max-tokens", type=int, default=3072, help="Max output tokens per local call")
     parser.add_argument("--temperature", type=float, default=0.1)
     parser.add_argument("--output", default="", help="Markdown output path")
+    parser.add_argument("--eval-db", default=os.environ.get("PR_DAEMON_MODEL_EVAL_DB", ""), help="Optional SQLite model-eval DB to load prior prompt improvements")
+    parser.add_argument("--owner", default="", help="GitHub owner for SQL prior-eval lookup")
+    parser.add_argument("--repo-name", default="", help="GitHub repository name for SQL prior-eval lookup")
+    parser.add_argument("--pr-number", default="", help="GitHub PR number for SQL prior-eval lookup")
     args = parser.parse_args()
 
-    repo = repo_root(Path(args.repo).resolve())
-
-    diff = get_diff(repo, args.base, args.target, args.worktree)
+    if args.diff_file:
+        repo = Path(args.repo).resolve()
+        diff = Path(args.diff_file).read_text(encoding="utf-8")
+    else:
+        repo = repo_root(Path(args.repo).resolve())
+        diff = get_diff(repo, args.base, args.target, args.worktree)
     if not diff.strip():
         print("No diff to review.")
         return 0
+
+    extra_context = []
+    for context_file in args.context_file:
+        content = Path(context_file).read_text(encoding="utf-8").strip()
+        if content:
+            extra_context.append(f"Context from {context_file}:\n{content}")
+    prior_eval_context = load_prior_eval_context(args.eval_db, args.owner, args.repo_name, args.pr_number)
+    if prior_eval_context:
+        extra_context.append(prior_eval_context)
+    context_block = "\n\n".join(extra_context)
 
     chunks = chunk_text(diff, args.max_chars)
     reviews: list[str] = []
@@ -142,6 +229,14 @@ def main() -> int:
             Review git diff chunk {index}/{len(chunks)} from repository {repo.name}.
             Base: {args.base}
             Target: {args.target}
+            {context_block}
+
+            Required output sections:
+            - Confirmed blockers
+            - Non-blocking hardening
+            - Prior findings verification
+            - False positives / uncertainty
+            - Confidence
 
             Diff:
             ```diff
