@@ -214,6 +214,205 @@ Models: http://127.0.0.1:8000/v1/models
 Chat completions: http://127.0.0.1:8000/v1/chat/completions
 ```
 
+### 一步步启动 24 小时 PR Review 系统
+
+这套系统分两层：Rapid-MLX 常驻模型负责便宜的初审，Python watcher 负责持续扫描 PR，Codex 负责最终复核并发布 GitHub review。Codex 即使 approve 也不会 merge PR。
+
+#### 1. 进入 PR-Daemon
+
+```bash
+cd /Users/jason/Dev/tools/PR-Daemon
+```
+
+#### 2. 检查 GitHub 账号
+
+默认账号应该是 `jhfnetboy`：
+
+```bash
+gh api user -q .login
+```
+
+如果不是，切回主账号：
+
+```bash
+bash scripts/ensure_main_github_account.sh
+```
+
+确认 `.env` 里有 review 账号 token，这样发布 review 时会临时用 `clestons`，不污染默认账号：
+
+```bash
+test -f .env && grep -E '^PR_DAEMON_REVIEW_USER=|^PR_DAEMON_REVIEW_TOKEN=' .env
+```
+
+#### 3. 检查本地业务仓库
+
+不要重复 clone。PR-Daemon 会优先使用这些本地路径：
+
+```text
+/Users/jason/Dev/aastar
+/Users/jason/Dev/auraai
+/Users/jason/Dev/mycelium
+```
+
+当前映射可用下面命令检查：
+
+```bash
+python3 scripts/resolve_repo.py AAStarCommunity/AirAccount
+```
+
+#### 4. 启动本地模型
+
+如果是在普通 macOS Terminal 里，推荐常驻前台启动，日志会同时显示在屏幕并写入文件：
+
+```bash
+scripts/start_rapid_mlx_resident.sh
+```
+
+另开一个 Terminal 检查状态：
+
+```bash
+scripts/rapid_mlx_daemon.sh status
+```
+
+日志默认写入：
+
+```text
+$HOME/.local/state/pr-daemon/rapid-mlx-8000.log
+```
+
+默认超过 50MB 自动轮转。可以调整：
+
+```bash
+PR_DAEMON_MAX_LOG_BYTES=$((100 * 1024 * 1024)) scripts/start_rapid_mlx_resident.sh
+```
+
+如果模型已经在跑，Codex/watcher 会复用 `http://127.0.0.1:8000/v1`。
+
+#### 5. 先跑一次安全扫描
+
+这一步只扫描 open PR、写 SQLite、生成 Codex prompt，不会自动发 review：
+
+```bash
+python3 scripts/review_watch.py --max-reviews-per-cycle 3
+```
+
+查看扫描结果：
+
+```bash
+sqlite3 reviews/pr-watch.sqlite \
+  'select repo, pr_number, status, review_decision, substr(head_oid,1,7), title from pr_watch_targets order by last_seen_at desc limit 20;'
+```
+
+查看生成的 prompt：
+
+```bash
+ls reviews/watch-prompts
+```
+
+#### 6. 启动后台 watcher
+
+默认安全模式：只持续扫描和生成 prompt，不自动调用 Codex review：
+
+```bash
+scripts/start_review_watch.sh
+```
+
+查看 watcher 日志：
+
+```bash
+tail -f "$HOME/.local/state/pr-daemon/review-watch.log"
+```
+
+停止 watcher：
+
+```bash
+kill "$(cat "$HOME/.local/state/pr-daemon/review-watch.pid")"
+```
+
+#### 7. 启动 canary 自动 review
+
+确认安全扫描正常后，再启用自动 review。建议先一次循环最多处理 1 个 PR：
+
+```bash
+PR_DAEMON_AUTO_REVIEW=1 \
+PR_DAEMON_MAX_REVIEWS_PER_CYCLE=1 \
+scripts/start_review_watch.sh
+```
+
+想先看它会启动什么命令，不真正调用 Codex：
+
+```bash
+PR_DAEMON_AUTO_REVIEW=1 \
+PR_DAEMON_DRY_RUN=1 \
+scripts/start_review_watch.sh
+```
+
+#### 8. 循环如何工作
+
+- watcher 扫描 `~/.config/prbot/repos.conf` 里的 repo scope，并写入 `reviews/pr-watch.sqlite`。
+- 新 PR、没有 review 的 PR、head commit 变化的 PR 会进入队列。
+- watcher 启动 `codex exec` 处理一个具体 PR。
+- Codex 用本地模型做 broad pass，再独立复核源码、diff、测试和历史 SQL 改进项。
+- Codex 必须发布 GitHub review/comment，并把结果写回 Markdown 和 SQLite。
+- 如果是 `REQUEST_CHANGES`，watcher 等 PR 作者 push 新 commit 后再复审。
+- 如果最终 `APPROVE`，Codex 仍然禁止 merge；PR 作者或 maintainer 看完 comment 后自己 merge。
+- PR merge 后，GitHub 内置 `delete_branch_on_merge=true` 会删除远端分支。
+
+#### 9. 查看本地模型是否变好
+
+```bash
+python3 scripts/model_eval_db.py scorecard --owner AAStarCommunity --repo AirAccount --pr-number 34 --limit 5
+```
+
+每次 review 都会记录：
+
+- 本地模型评分。
+- 它找到的有效问题。
+- 它的误报。
+- 它漏掉的问题。
+- 上一次改进项这次是否真的改善。
+- 下一次 prompt 应强化什么。
+
+#### 10. 本地 `origin/main.lock` 权限问题
+
+如果 push 成功但出现：
+
+```text
+cannot lock ref 'refs/remotes/origin/main'
+```
+
+这通常不是远端 push 失败，而是当前 Codex 沙箱不能写本地 `.git/refs/remotes/origin`。先用远端确认：
+
+```bash
+git ls-remote origin refs/heads/main
+```
+
+如果远端 hash 是新 commit，说明 push 已成功。
+
+在普通 Terminal 里可以检查本地是否能写：
+
+```bash
+cd /Users/jason/Dev/tools/PR-Daemon
+touch .git/refs/remotes/origin/.write-test && rm .git/refs/remotes/origin/.write-test
+```
+
+如果普通 Terminal 也失败，修本地权限：
+
+```bash
+sudo chown -R "$USER":staff .git/refs/remotes .git/logs/refs/remotes
+chmod -R u+rwX .git/refs/remotes .git/logs/refs/remotes
+```
+
+如果普通 Terminal 能写、但 Codex 不能写，这是本次 Codex 沙箱限制。下次启动 Codex 时继续把仓库作为 writable workspace 加入即可；push 仍然可以成功，验证远端用 `git ls-remote`。
+
+#### 11. 普通人每天要做什么
+
+正常情况下只要做三件事：
+
+1. 开一个 Terminal 跑 `scripts/start_rapid_mlx_resident.sh`。
+2. 开另一个 Terminal 跑 `PR_DAEMON_AUTO_REVIEW=1 PR_DAEMON_MAX_REVIEWS_PER_CYCLE=1 scripts/start_review_watch.sh`。
+3. 定期看 `review-watch.log`、GitHub PR comments、以及 `model_eval_db.py scorecard`。
+
 ### 每次怎么用
 
 进入本目录后，对 Codex 说：
