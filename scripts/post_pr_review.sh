@@ -117,7 +117,7 @@ case "$MODE" in
     ;;
 esac
 
-PAYLOAD="$(mktemp "${TMPDIR:-/tmp}/pr-review.XXXXXX.json")"
+PAYLOAD="$(mktemp "${TMPDIR:-/tmp}/pr-review.XXXXXX")"
 if [ "$MODE" = "--approve" ] && [ -z "$BODY_FILE" ]; then
   jq -n --arg event "$EVENT" '{event:$event}' > "$PAYLOAD"
 else

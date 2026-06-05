@@ -490,6 +490,14 @@ bash scripts/post_pr_review.sh \
 
 复查同一个 PR 时，`skills/rapid-mlx-review/scripts/local_review.py` 可以通过 `--eval-db reviews/model-evals/model-evals.sqlite --owner OWNER --repo-name REPO --pr-number N` 自动读取历史改进项，并把它们注入本地模型 prompt。Codex 仍然必须独立验证本地模型输出；SQL 只用于让本地模型持续改进，不替代最终 review 判断。
 
+### Review 完成契约
+
+每次 PR review 必须满足三个条件才算完成：
+
+- 有明确结论：`APPROVE`、`REQUEST_CHANGES`、或只留 `COMMENT` 的非阻塞结论。
+- 必须在 GitHub PR 上留下对应 review/comment；如果发布失败，必须记录失败原因并继续修复发布流程。
+- 必须更新本地记录：review 文案、local model markdown 评估、SQLite 评分与改进项都要同步更新。
+
 ### 已知问题记录
 
 2026-06-05：在 Codex/headless 沙箱中直接启动 Rapid-MLX 失败，日志为 `No Metal device available`。这是当前进程无法访问 macOS Metal GPU，不是模型文件路径错误。
@@ -998,6 +1006,14 @@ After every PR review that uses `qwen3.6-a3b`, record two outputs:
 - SQLite record: use `scripts/model_eval_db.py record-run` to write the score, model behavior, whether previous improvement items actually helped, and next prompt improvements into `reviews/model-evals/model-evals.sqlite`.
 
 When re-reviewing the same PR, `skills/rapid-mlx-review/scripts/local_review.py` can load prior improvements with `--eval-db reviews/model-evals/model-evals.sqlite --owner OWNER --repo-name REPO --pr-number N` and inject them into the local-model prompt. Codex must still independently verify the local output; SQL history is for continuous local-model improvement, not final authority.
+
+### Review Completion Contract
+
+Every PR review is complete only when all three conditions are true:
+
+- There is an explicit conclusion: `APPROVE`, `REQUEST_CHANGES`, or a non-blocking `COMMENT`.
+- The corresponding review/comment has been posted to the GitHub PR. If posting fails, record the failure reason and fix the posting path.
+- Local records are updated: review body, local-model markdown evaluation, SQLite score, and improvement items.
 
 ### Known Issue Log
 

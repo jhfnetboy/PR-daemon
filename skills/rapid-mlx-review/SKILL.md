@@ -143,6 +143,14 @@ Commands/tests run, or why they were not run.
 
 If no real issues are found, say so clearly and mention residual test gaps.
 
+## Completion Contract
+
+Every PR review must end with all of the following:
+
+- A clear conclusion: `APPROVE`, `REQUEST_CHANGES`, or a non-blocking `COMMENT`.
+- A posted GitHub review/comment matching that conclusion. If posting fails, record the failure and fix or retry the posting flow.
+- Updated local records in PR-Daemon: review body, local-model markdown evaluation, SQLite score, prior-improvement evaluation, and next improvement items.
+
 ## GitHub Posting
 
 Do not post PR comments or use a different GitHub account unless the user explicitly asks for posting. If posting is requested, verify `gh auth status`, selected account, repository, and target PR before creating comments. For PR-Daemon's default posting flow, switch to `clestons` first and verify `gh api user -q .login` returns the intended review account.
