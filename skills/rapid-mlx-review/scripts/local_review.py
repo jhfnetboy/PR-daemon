@@ -39,6 +39,11 @@ HIDDEN_REASONING_MARKERS = [
     "step-by-step reasoning",
     "analyze user input",
     "synthesize findings",
+    "the user wants",
+    "let's examine",
+    "i will formulate",
+    "draft:",
+    "check against constraints",
 ]
 
 
