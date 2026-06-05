@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "updated_at": "2026-06-05",
+  "github": {
+    "host": "github.com",
+    "main_user": "jhfnetboy",
+    "review_user": "clestons",
+    "review_email": "clestons@gmail.com",
+    "policy": "Keep main_user active by default. Switch to review_user only for posting PR reviews, then switch back to main_user immediately."
+  }
+}

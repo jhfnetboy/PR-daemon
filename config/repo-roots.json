@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "updated_at": "2026-06-05",
+  "roots": [
+    {
+      "owner": "AAStarCommunity",
+      "aliases": ["aastar", "AAStarCommunity"],
+      "path": "~/Dev/aastar"
+    },
+    {
+      "owner": "AuraAI",
+      "aliases": ["auraai", "AuraAI"],
+      "path": "~/Dev/auraai"
+    },
+    {
+      "owner": "mycelium",
+      "aliases": ["mycelium", "Mycelium"],
+      "path": "~/Dev/mycelium"
+    }
+  ],
+  "rule": "Resolve OWNER/REPO to the configured owner root first. If the repository directory is missing, clone into that root instead of using /tmp."
+}

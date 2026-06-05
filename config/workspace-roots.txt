@@ -1,0 +1,4 @@
+/Users/jason/Dev/tools/PR-Daemon
+/Users/jason/Dev/aastar
+/Users/jason/Dev/auraai
+/Users/jason/Dev/mycelium
