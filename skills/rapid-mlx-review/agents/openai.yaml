@@ -1,0 +1,4 @@
+interface:
+  display_name: "Rapid-MLX Review"
+  short_description: "Local-first code review with Codex adjudication"
+  default_prompt: "Use $rapid-mlx-review to review this repository with local Rapid-MLX first, then perform a Codex deep review and summarize the combined verdict."
