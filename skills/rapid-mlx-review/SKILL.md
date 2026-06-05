@@ -107,7 +107,39 @@ python3 /path/to/rapid-mlx-review/scripts/local_review.py --repo /path/to/local/
    - Save the narrative record in `reviews/model-evals/` when working in PR-Daemon.
    - Also record the run in SQL with `scripts/model_eval_db.py record-run`, including score, useful findings, false positives, misses, prompt gaps, prior-improvement evaluation, and next prompt improvements.
    - On re-review, evaluate whether the previous run's improvement items actually improved the model output; record that result in `prior_improvement_evaluation`.
+   - Use `scripts/model_eval_db.py assess-item` to mark each carried-forward improvement item as `effective`, `ineffective`, `needs_followup`, or `retired`.
+   - Use `scripts/model_eval_db.py scorecard` to check recent scores, open improvement items, and whether the local model is improving or repeating the same failure modes.
    - Update this skill when a repeated failure mode appears.
+
+## Local Model Use Cases
+
+The local model is useful for:
+
+- Batch PR triage: summarize change scope, changed subsystems, obvious risk areas, and files Codex should inspect first.
+- Repetitive verification: re-check prior findings, adversarial examples, test matrices, grep gates, and config invariants.
+- Hypothesis generation: propose likely regressions, missing tests, and edge cases for Codex to verify or reject.
+- Review recordkeeping: draft structured summaries, local findings, false positives, misses, and next prompt improvements.
+- Comment drafting after Codex has already decided the final finding.
+
+Do not trust the local model as final authority for security boundaries, concurrency, state machines, chain/TEE behavior, CI gates, data loss, or API contracts. Codex must independently verify final findings.
+
+## Feedback Loop
+
+For every review, keep the loop measurable:
+
+1. Inject open SQL improvement items into the local-model prompt.
+2. Run local broad pass.
+3. Codex independently reviews and adjudicates local findings.
+4. Score the local model from 0-10.
+5. Record the run in SQLite and Markdown.
+6. Mark prior improvement items:
+   - `effective`: this item improved behavior; stop carrying it.
+   - `ineffective`: no improvement; keep carrying it and make the constraint stronger.
+   - `needs_followup`: partial improvement; verify again next run.
+   - `retired`: no longer relevant.
+7. Add only a small number of concrete next improvements.
+
+Treat an improvement as real only if there is observable evidence: fewer repeated misses, fewer false positives, better required-section compliance, correct truth tables, fewer Codex-only blockers, or faster final GitHub review with less rework.
 
 ## Local Review Prompt Standard
 

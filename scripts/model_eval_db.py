@@ -56,7 +56,23 @@ CREATE TABLE IF NOT EXISTS model_improvement_items (
 
 CREATE INDEX IF NOT EXISTS idx_model_improvement_items_target
 ON model_improvement_items(owner, repo, pr_number, status, id);
+
+CREATE TABLE IF NOT EXISTS model_improvement_assessments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    improvement_item_id INTEGER NOT NULL,
+    assessed_run_id INTEGER,
+    status TEXT NOT NULL,
+    evaluation TEXT NOT NULL,
+    FOREIGN KEY(improvement_item_id) REFERENCES model_improvement_items(id),
+    FOREIGN KEY(assessed_run_id) REFERENCES model_review_runs(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_model_improvement_assessments_item
+ON model_improvement_assessments(improvement_item_id, created_at);
 """
+
+ALLOWED_ITEM_STATUSES = {"proposed", "effective", "ineffective", "needs_followup", "retired"}
 
 
 def connect(db_path: str) -> sqlite3.Connection:
@@ -82,6 +98,50 @@ def parse_list(value: str) -> list[str]:
     return [line.strip() for line in value.splitlines() if line.strip()]
 
 
+def parse_assessment(value: str) -> tuple[int, str, str]:
+    parts = value.split(":", 2)
+    if len(parts) != 3:
+        raise ValueError("assessment must be ITEM_ID:STATUS:EVALUATION")
+    item_id = int(parts[0])
+    status = parts[1].strip()
+    evaluation = parts[2].strip()
+    if status not in ALLOWED_ITEM_STATUSES:
+        allowed = ", ".join(sorted(ALLOWED_ITEM_STATUSES))
+        raise ValueError(f"status must be one of: {allowed}")
+    if not evaluation:
+        raise ValueError("assessment evaluation cannot be empty")
+    return item_id, status, evaluation
+
+
+def record_assessment(
+    conn: sqlite3.Connection,
+    item_id: int,
+    status: str,
+    evaluation: str,
+    assessed_run_id: int | None,
+) -> None:
+    carried_to_next = 0 if status in {"effective", "retired"} else 1
+    cursor = conn.execute(
+        """
+        UPDATE model_improvement_items
+        SET status = ?, evaluation = ?, carried_to_next = ?
+        WHERE id = ?
+        """,
+        (status, evaluation, carried_to_next, item_id),
+    )
+    if cursor.rowcount != 1:
+        raise ValueError(f"unknown improvement item id: {item_id}")
+    conn.execute(
+        """
+        INSERT INTO model_improvement_assessments (
+            improvement_item_id, assessed_run_id, status, evaluation
+        )
+        VALUES (?, ?, ?, ?)
+        """,
+        (item_id, assessed_run_id, status, evaluation),
+    )
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     with connect(args.db):
         pass
@@ -91,6 +151,7 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 def cmd_record_run(args: argparse.Namespace) -> int:
     next_items = parse_list(args.next_prompt_improvements)
+    assessments = [parse_assessment(value) for value in args.assess_item]
     with connect(args.db) as conn:
         cursor = conn.execute(
             """
@@ -135,7 +196,16 @@ def cmd_record_run(args: argparse.Namespace) -> int:
                 """,
                 (args.owner, args.repo, args.pr_number, run_id, item, "proposed for the next review"),
             )
+        for item_id, status, evaluation in assessments:
+            record_assessment(conn, item_id, status, evaluation, run_id)
     print(run_id)
+    return 0
+
+
+def cmd_assess_item(args: argparse.Namespace) -> int:
+    with connect(args.db) as conn:
+        record_assessment(conn, args.item_id, args.status, args.evaluation, args.assessed_run_id)
+    print(args.item_id)
     return 0
 
 
@@ -159,6 +229,7 @@ def cmd_prior_context(args: argparse.Namespace) -> int:
             SELECT improvement_text, status, evaluation
             FROM model_improvement_items
             WHERE owner = ? AND repo = ? AND pr_number = ?
+              AND carried_to_next = 1
             ORDER BY id DESC
             LIMIT ?
             """,
@@ -182,6 +253,69 @@ def cmd_prior_context(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_scorecard(args: argparse.Namespace) -> int:
+    path = Path(args.db)
+    if not path.exists():
+        return 0
+    with connect(args.db) as conn:
+        runs = conn.execute(
+            """
+            SELECT id, created_at, head_oid, score, verdict, prior_improvement_evaluation
+            FROM model_review_runs
+            WHERE owner = ? AND repo = ? AND pr_number = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (args.owner, args.repo, args.pr_number, args.limit),
+        ).fetchall()
+        status_counts = conn.execute(
+            """
+            SELECT status, COUNT(*) AS count
+            FROM model_improvement_items
+            WHERE owner = ? AND repo = ? AND pr_number = ?
+            GROUP BY status
+            ORDER BY status
+            """,
+            (args.owner, args.repo, args.pr_number),
+        ).fetchall()
+        open_items = conn.execute(
+            """
+            SELECT id, improvement_text, status, evaluation
+            FROM model_improvement_items
+            WHERE owner = ? AND repo = ? AND pr_number = ? AND carried_to_next = 1
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (args.owner, args.repo, args.pr_number, args.limit * 3),
+        ).fetchall()
+
+    if not runs:
+        print("No model review runs recorded.")
+        return 0
+
+    scores = [float(row["score"]) for row in runs]
+    print(f"Model review scorecard for {args.owner}/{args.repo}#{args.pr_number}")
+    print(f"recent_runs: {len(runs)}")
+    print(f"recent_score_avg: {sum(scores) / len(scores):.2f}")
+    print(f"recent_score_min: {min(scores):.2f}")
+    print(f"recent_score_max: {max(scores):.2f}")
+    print("runs:")
+    for row in runs:
+        head = (row["head_oid"] or "")[:7]
+        print(f"- #{row['id']} {row['created_at']} head={head} score={row['score']} verdict={row['verdict'] or ''}")
+        if row["prior_improvement_evaluation"]:
+            print(f"  prior_improvement_evaluation: {row['prior_improvement_evaluation']}")
+    if status_counts:
+        print("improvement_status_counts:")
+        for row in status_counts:
+            print(f"- {row['status']}: {row['count']}")
+    if open_items:
+        print("open_improvement_items:")
+        for row in open_items:
+            print(f"- #{row['id']} [{row['status']}] {row['improvement_text']} ({row['evaluation'] or 'not evaluated'})")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Record PR-Daemon local-model evaluations.")
     parser.add_argument("--db", default=str(DEFAULT_DB), help="SQLite database path")
@@ -196,6 +330,20 @@ def build_parser() -> argparse.ArgumentParser:
     prior_parser.add_argument("--pr-number", type=int, required=True)
     prior_parser.add_argument("--limit", type=int, default=3)
     prior_parser.set_defaults(func=cmd_prior_context)
+
+    scorecard_parser = subparsers.add_parser("scorecard", help="Summarize recent model-review quality and open improvement items")
+    scorecard_parser.add_argument("--owner", required=True)
+    scorecard_parser.add_argument("--repo", required=True)
+    scorecard_parser.add_argument("--pr-number", type=int, required=True)
+    scorecard_parser.add_argument("--limit", type=int, default=5)
+    scorecard_parser.set_defaults(func=cmd_scorecard)
+
+    assess_parser = subparsers.add_parser("assess-item", help="Mark whether a prompt improvement item worked")
+    assess_parser.add_argument("--item-id", type=int, required=True)
+    assess_parser.add_argument("--status", choices=sorted(ALLOWED_ITEM_STATUSES), required=True)
+    assess_parser.add_argument("--evaluation", required=True)
+    assess_parser.add_argument("--assessed-run-id", type=int, default=None)
+    assess_parser.set_defaults(func=cmd_assess_item)
 
     record_parser = subparsers.add_parser("record-run", help="Insert one local-model evaluation run")
     record_parser.add_argument("--owner", required=True)
@@ -215,6 +363,12 @@ def build_parser() -> argparse.ArgumentParser:
     record_parser.add_argument("--prior-improvements-applied", default="")
     record_parser.add_argument("--prior-improvement-evaluation", default="")
     record_parser.add_argument("--next-prompt-improvements", default="")
+    record_parser.add_argument(
+        "--assess-item",
+        action="append",
+        default=[],
+        help="Assess prior improvement as ITEM_ID:STATUS:EVALUATION; repeatable",
+    )
     record_parser.add_argument("--codex-adjudication", default="")
     record_parser.add_argument("--verification", default="")
     record_parser.set_defaults(func=cmd_record_run)

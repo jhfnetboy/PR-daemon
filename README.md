@@ -490,6 +490,56 @@ bash scripts/post_pr_review.sh \
 
 复查同一个 PR 时，`skills/rapid-mlx-review/scripts/local_review.py` 可以通过 `--eval-db reviews/model-evals/model-evals.sqlite --owner OWNER --repo-name REPO --pr-number N` 自动读取历史改进项，并把它们注入本地模型 prompt。Codex 仍然必须独立验证本地模型输出；SQL 只用于让本地模型持续改进，不替代最终 review 判断。
 
+本地模型更适合承担这些工作：
+
+- 批量 review 的第一轮 triage：摘要改动范围、列出风险区域、挑出值得 Codex 深挖的文件。
+- 重复性检查：把上一轮 review finding、adversarial case、测试清单逐项复核。
+- 安全 gate / grep / 配置类检查的候选反例生成，例如列出所有合法参数形式再做 truth table。
+- Review 记录整理：把 local findings、Codex adjudication、误报、漏报、评分和下轮改进项结构化写入 SQL/Markdown。
+- 非最终 comment 草稿：提供初稿，但最终结论必须由 Codex 复核后发布。
+
+本地模型不适合单独承担最终判断，尤其是安全边界、并发/状态机、跨模块协议、链上/TEE/CI gate 这类高风险问题。Codex 必须独立看 diff、跑验证命令，并把本地模型输出标记为 confirmed、rejected、missed 或 Codex-only。
+
+### 本地模型正循环
+
+每次 review 后按同一套闭环推进：
+
+1. 本地模型先做 broad pass，并自动读取 SQL 中仍需携带的改进项。
+2. Codex 独立复查，验证每个 finding 和 carried-forward improvement。
+3. Codex 给本地模型打 0-10 分，记录 useful findings、false positives、misses、prompt gaps。
+4. 用 `scripts/model_eval_db.py record-run` 写入本次评分和下一轮改进项。
+5. 用 `scripts/model_eval_db.py assess-item` 标记上一轮改进是否真的生效：
+   - `effective`：本轮确实改善，停止继续携带。
+   - `ineffective`：本轮没有改善，继续携带并需要更强约束。
+   - `needs_followup`：部分改善，但仍需下轮验证。
+   - `retired`：不再适用。
+6. 下次 review 只把 `carried_to_next=1` 的改进项注入 prompt，避免越积越乱。
+7. 用 `scripts/model_eval_db.py scorecard` 查看最近评分、改进项状态和未解决问题，判断模型能力是否真的提升。
+
+有效提升的判定不是“模型说得更像”，而是可量化结果：
+
+- 同类 miss 是否减少。
+- false positive 是否减少。
+- 是否遵守输出格式和 truth table 要求。
+- carried-forward improvement 是否被正确执行。
+- Codex-only blocker 数量是否下降。
+- GitHub review 结论是否更快、更少返工。
+
+常用命令：
+
+```bash
+python3 scripts/model_eval_db.py prior-context \
+  --owner AAStarCommunity --repo AirAccount --pr-number 30
+
+python3 scripts/model_eval_db.py scorecard \
+  --owner AAStarCommunity --repo AirAccount --pr-number 30
+
+python3 scripts/model_eval_db.py assess-item \
+  --item-id 3 \
+  --status ineffective \
+  --evaluation "SQL context included -F examples, but the model still missed the alias."
+```
+
 ### Review 完成契约
 
 每次 PR review 必须满足三个条件才算完成：
@@ -1006,6 +1056,41 @@ After every PR review that uses `qwen3.6-a3b`, record two outputs:
 - SQLite record: use `scripts/model_eval_db.py record-run` to write the score, model behavior, whether previous improvement items actually helped, and next prompt improvements into `reviews/model-evals/model-evals.sqlite`.
 
 When re-reviewing the same PR, `skills/rapid-mlx-review/scripts/local_review.py` can load prior improvements with `--eval-db reviews/model-evals/model-evals.sqlite --owner OWNER --repo-name REPO --pr-number N` and inject them into the local-model prompt. Codex must still independently verify the local output; SQL history is for continuous local-model improvement, not final authority.
+
+The local model is most useful for:
+
+- First-pass triage across many PRs: summarize the diff, risk areas, and files Codex should inspect deeply.
+- Repetitive checks: verify prior review findings, adversarial examples, and test checklists.
+- Security gate / grep / config review hypothesis generation, especially enumerating valid input forms and producing truth tables.
+- Review recordkeeping: structure local findings, Codex adjudication, false positives, misses, score, and next improvement items.
+- Draft review comments that Codex rewrites or rejects before posting.
+
+It is not trusted as the final reviewer for security boundaries, concurrency/state machines, cross-module contracts, chain/TEE behavior, or CI gate correctness. Codex must independently inspect diffs, run verification commands, and mark local output as confirmed, rejected, missed, or Codex-only.
+
+### Local Model Feedback Loop
+
+Every review follows the same loop:
+
+1. The local model runs a broad pass with open SQL improvement items injected.
+2. Codex independently reviews the diff and verifies each finding and carried-forward improvement.
+3. Codex scores the local model from 0-10 and records useful findings, false positives, misses, and prompt gaps.
+4. `scripts/model_eval_db.py record-run` stores the score and next improvement items.
+5. `scripts/model_eval_db.py assess-item` marks whether previous improvements worked:
+   - `effective`: it improved behavior; stop carrying it.
+   - `ineffective`: it did not improve behavior; keep carrying it with stronger constraints.
+   - `needs_followup`: partial improvement; verify again next run.
+   - `retired`: no longer relevant.
+6. The next review injects only `carried_to_next=1` items, keeping prompt history focused.
+7. `scripts/model_eval_db.py scorecard` reports recent scores, item status, and open issues so improvement is measured rather than assumed.
+
+Improvement is effective only when observable quality improves:
+
+- Fewer repeated misses.
+- Fewer false positives.
+- Better compliance with required output sections and truth tables.
+- Correct execution of carried-forward improvement items.
+- Fewer Codex-only blockers.
+- Faster final GitHub review with less rework.
 
 ### Review Completion Contract
 
