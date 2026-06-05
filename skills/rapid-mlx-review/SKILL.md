@@ -182,6 +182,7 @@ Every PR review must end with all of the following:
 - A clear conclusion: `APPROVE`, `REQUEST_CHANGES`, or a non-blocking `COMMENT`.
 - A posted GitHub review/comment matching that conclusion. If posting fails, record the failure and fix or retry the posting flow.
 - Updated local records in PR-Daemon: review body, local-model markdown evaluation, SQLite score, prior-improvement evaluation, and next improvement items.
+- Never merge the PR after approval. The PR author or maintainer must read the review/comment and decide whether to merge.
 
 ## GitHub Posting
 

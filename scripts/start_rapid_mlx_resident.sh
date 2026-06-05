@@ -10,20 +10,32 @@ LOAD_MODEL="${RAPID_MLX_LOAD_MODEL:-qwen3.6-35b-6bit}"
 SERVED_MODEL_NAME="${RAPID_MLX_MODEL:-qwen3.6-a3b}"
 PREFILL_STEP_SIZE="${RAPID_MLX_PREFILL_STEP_SIZE:-4096}"
 GPU_MEMORY_UTILIZATION="${RAPID_MLX_GPU_MEMORY_UTILIZATION:-0.85}"
+LOG_DIR="${PR_DAEMON_LOG_DIR:-$HOME/.local/state/pr-daemon}"
+LOG_FILE="${LOG_DIR}/rapid-mlx-${PORT}.log"
+MAX_LOG_BYTES="${PR_DAEMON_MAX_LOG_BYTES:-52428800}"
+
+mkdir -p "$LOG_DIR"
+if [ -f "$LOG_FILE" ]; then
+  size="$(wc -c <"$LOG_FILE" 2>/dev/null || echo 0)"
+  if [ "${size:-0}" -gt "$MAX_LOG_BYTES" ]; then
+    mv "$LOG_FILE" "${LOG_FILE}.$(date +%Y%m%d%H%M%S)"
+  fi
+fi
 
 echo "Starting resident Rapid-MLX server"
 echo "  load model: $LOAD_MODEL"
 echo "  API model:  $SERVED_MODEL_NAME"
 echo "  base URL:   http://$HOST:$PORT/v1"
 echo "  docs:       http://$HOST:$PORT/docs"
+echo "  log file:   $LOG_FILE"
 echo
 echo "Keep this terminal open. Press Ctrl-C to stop."
 echo
 
-exec rapid-mlx serve "$LOAD_MODEL" \
+rapid-mlx serve "$LOAD_MODEL" \
   --host "$HOST" \
   --port "$PORT" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --prefill-step-size "$PREFILL_STEP_SIZE" \
   --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
-  --enable-prefix-cache
+  --enable-prefix-cache 2>&1 | tee -a "$LOG_FILE"

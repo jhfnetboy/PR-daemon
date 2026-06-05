@@ -596,6 +596,7 @@ GitHub merged branch 自动删除：
 - 有明确结论：`APPROVE`、`REQUEST_CHANGES`、或只留 `COMMENT` 的非阻塞结论。
 - 必须在 GitHub PR 上留下对应 review/comment；如果发布失败，必须记录失败原因并继续修复发布流程。
 - 必须更新本地记录：review 文案、local model markdown 评估、SQLite 评分与改进项都要同步更新。
+- 禁止 merge PR，即使已经 approve。发起方/maintainer 必须自己读完 comment 后决定是否 merge。
 
 ### 已知问题记录
 
@@ -1180,6 +1181,7 @@ Every PR review is complete only when all three conditions are true:
 - There is an explicit conclusion: `APPROVE`, `REQUEST_CHANGES`, or a non-blocking `COMMENT`.
 - The corresponding review/comment has been posted to the GitHub PR. If posting fails, record the failure reason and fix the posting path.
 - Local records are updated: review body, local-model markdown evaluation, SQLite score, and improvement items.
+- Never merge the PR, even after approval. The PR author or maintainer must read the comment and decide whether to merge.
 
 ### Known Issue Log
 

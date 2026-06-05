@@ -20,6 +20,16 @@ if ! mkdir -p "$LOG_DIR" 2>/dev/null; then
   mkdir -p "$LOG_DIR"
 fi
 LOG_FILE="${LOG_DIR}/rapid-mlx-${PORT}.log"
+MAX_LOG_BYTES="${PR_DAEMON_MAX_LOG_BYTES:-52428800}"
+
+rotate_log() {
+  if [ -f "$LOG_FILE" ]; then
+    size="$(wc -c <"$LOG_FILE" 2>/dev/null || echo 0)"
+    if [ "${size:-0}" -gt "$MAX_LOG_BYTES" ]; then
+      mv "$LOG_FILE" "${LOG_FILE}.$(date +%Y%m%d%H%M%S)"
+    fi
+  fi
+}
 
 health() {
   curl -fs -m 5 "${BASE_URL}/models" >/dev/null
@@ -47,6 +57,7 @@ start_server() {
     rapid-mlx info "$LOAD_MODEL" >/dev/null
   fi
 
+  rotate_log
   nohup rapid-mlx serve "$LOAD_MODEL" \
     --host "$HOST" \
     --port "$PORT" \
