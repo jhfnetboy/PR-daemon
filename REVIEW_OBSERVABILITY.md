@@ -58,9 +58,12 @@ no active codex review
 
 - DeepSeek 一共审了多少条
 - Rapid-MLX 一共审了多少条
+- unique PR 数
 - 各自平均分
 - fallback 次数
-- verdict 分布
+- `approve / request_changes / comment` 计数
+- `codex_override` 次数
+- `codex_only_findings` 次数
 
 ### 4. 看某一条 PR 的完整评分卡
 

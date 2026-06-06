@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS model_review_runs (
     useful_findings TEXT,
     false_positives TEXT,
     misses TEXT,
+    codex_override INTEGER,
+    codex_only_findings INTEGER,
     prompt_gaps TEXT,
     prior_improvements_applied TEXT,
     prior_improvement_evaluation TEXT,
@@ -84,6 +86,8 @@ RUN_EXTRA_COLUMNS = {
     "thinking_mode": "TEXT",
     "reasoning_effort": "TEXT",
     "fallback_switched": "INTEGER",
+    "codex_override": "INTEGER",
+    "codex_only_findings": "INTEGER",
 }
 
 
@@ -127,6 +131,7 @@ def load_local_review_metadata(local_review_path: str) -> dict[str, object]:
         "Thinking Mode": "thinking_mode",
         "Reasoning Effort": "reasoning_effort",
         "Fallback Switched": "fallback_switched",
+        "Conclusion": "local_verdict",
     }
     for raw_line in path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
@@ -140,6 +145,8 @@ def load_local_review_metadata(local_review_path: str) -> dict[str, object]:
         if label == "Fallback Switched":
             parsed_bool = parse_boolish(str(parsed_value))
             parsed_value = parsed_bool if parsed_bool is not None else parsed_value
+        elif label == "Conclusion":
+            parsed_value = normalized_verdict_label(str(parsed_value))
         metadata[key_map[label]] = parsed_value
     return metadata
 
@@ -156,6 +163,34 @@ def normalized_provider_label(provider: str, model: str, local_review_path: str)
     if "rapid-mlx" in lowered or "qwen3.6-a3b" in lowered:
         return "rapid-mlx"
     return candidate
+
+
+def normalized_verdict_label(verdict: str) -> str:
+    lowered = (verdict or "").strip().lower()
+    if not lowered:
+        return "unknown"
+    if "request_changes" in lowered or "request changes" in lowered or "changes_requested" in lowered:
+        return "request_changes"
+    if "approve" in lowered or "approved" in lowered:
+        return "approve"
+    if "comment" in lowered or "commented" in lowered:
+        return "comment"
+    return lowered
+
+
+def infer_codex_only_findings(misses: str) -> int:
+    normalized = (misses or "").strip().lower()
+    if not normalized or normalized in {"none", "- none.", "[]", "none.", "- none"}:
+        return 0
+    return 1
+
+
+def infer_codex_override(local_verdict: str, final_verdict: str) -> int:
+    normalized_local = normalized_verdict_label(local_verdict)
+    normalized_final = normalized_verdict_label(final_verdict)
+    if normalized_local == "unknown" or normalized_final == "unknown":
+        return 0
+    return 1 if normalized_local != normalized_final else 0
 
 
 def parse_list(value: str) -> list[str]:
@@ -236,17 +271,24 @@ def cmd_record_run(args: argparse.Namespace) -> int:
     if fallback_switched is None:
         inferred_fallback = local_review_metadata.get("fallback_switched")
         fallback_switched = inferred_fallback if isinstance(inferred_fallback, int) else None
+    local_verdict = str(local_review_metadata.get("local_verdict", ""))
+    codex_override = args.codex_override
+    if codex_override is None:
+        codex_override = infer_codex_override(local_verdict, args.verdict)
+    codex_only_findings = args.codex_only_findings
+    if codex_only_findings is None:
+        codex_only_findings = infer_codex_only_findings(args.misses)
     with connect(args.db) as conn:
         cursor = conn.execute(
             """
             INSERT INTO model_review_runs (
                 owner, repo, pr_number, pr_url, head_oid, provider, model,
                 provider_base_url, thinking_mode, reasoning_effort, fallback_switched, local_review_path,
-                score, verdict, summary, useful_findings, false_positives, misses,
+                score, verdict, summary, useful_findings, false_positives, misses, codex_override, codex_only_findings,
                 prompt_gaps, prior_improvements_applied, prior_improvement_evaluation,
                 next_prompt_improvements, codex_adjudication, verification
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 args.owner,
@@ -267,6 +309,8 @@ def cmd_record_run(args: argparse.Namespace) -> int:
                 args.useful_findings,
                 args.false_positives,
                 args.misses,
+                codex_override,
+                codex_only_findings,
                 args.prompt_gaps,
                 args.prior_improvements_applied,
                 args.prior_improvement_evaluation,
@@ -350,7 +394,8 @@ def cmd_scorecard(args: argparse.Namespace) -> int:
     with connect(args.db) as conn:
         runs = conn.execute(
             """
-            SELECT id, created_at, head_oid, provider, model, local_review_path, fallback_switched, score, verdict, prior_improvement_evaluation
+            SELECT id, created_at, head_oid, provider, model, local_review_path, fallback_switched,
+                   score, verdict, codex_override, codex_only_findings, prior_improvement_evaluation
             FROM model_review_runs
             WHERE owner = ? AND repo = ? AND pr_number = ?
             ORDER BY id DESC
@@ -393,6 +438,8 @@ def cmd_scorecard(args: argparse.Namespace) -> int:
     provider_scores: dict[str, list[float]] = {}
     fallback_true = 0
     fallback_false = 0
+    codex_override_count = 0
+    codex_only_findings_count = 0
     for row in runs:
         provider = normalized_provider_label(
             str(row["provider"] or ""),
@@ -405,6 +452,10 @@ def cmd_scorecard(args: argparse.Namespace) -> int:
             fallback_true += 1
         elif row["fallback_switched"] == 0:
             fallback_false += 1
+        if row["codex_override"] == 1:
+            codex_override_count += 1
+        if row["codex_only_findings"] == 1:
+            codex_only_findings_count += 1
     if provider_counts:
         print("provider_summary:")
         for provider, count in sorted(provider_counts.items(), key=lambda item: (-item[1], item[0])):
@@ -413,6 +464,8 @@ def cmd_scorecard(args: argparse.Namespace) -> int:
     if fallback_true or fallback_false:
         print(f"fallback_switched_true: {fallback_true}")
         print(f"fallback_switched_false: {fallback_false}")
+    print(f"codex_override_count: {codex_override_count}")
+    print(f"codex_only_findings_count: {codex_only_findings_count}")
     print("runs:")
     for row in runs:
         head = (row["head_oid"] or "")[:7]
@@ -426,9 +479,11 @@ def cmd_scorecard(args: argparse.Namespace) -> int:
             fallback_text = " fallback=yes"
         elif row["fallback_switched"] == 0:
             fallback_text = " fallback=no"
+        override_text = " override=yes" if row["codex_override"] == 1 else ""
+        codex_only_text = " codex_only=yes" if row["codex_only_findings"] == 1 else ""
         print(
             f"- #{row['id']} {row['created_at']} head={head} provider={provider}{fallback_text} "
-            f"score={row['score']} verdict={row['verdict'] or ''}"
+            f"score={row['score']} verdict={row['verdict'] or ''}{override_text}{codex_only_text}"
         )
         if row["prior_improvement_evaluation"]:
             print(f"  prior_improvement_evaluation: {row['prior_improvement_evaluation']}")
@@ -452,7 +507,7 @@ def cmd_provider_summary(args: argparse.Namespace) -> int:
         runs = conn.execute(
             """
             SELECT owner, repo, pr_number, created_at, provider, model, local_review_path,
-                   fallback_switched, score, verdict
+                   fallback_switched, score, verdict, codex_override, codex_only_findings
             FROM model_review_runs
             WHERE (? = '' OR owner = ?)
               AND (? = '' OR repo = ?)
@@ -480,21 +535,32 @@ def cmd_provider_summary(args: argparse.Namespace) -> int:
                 "scores": [],
                 "fallback_true": 0,
                 "fallback_false": 0,
-                "verdicts": {},
+                "approve": 0,
+                "request_changes": 0,
+                "comment": 0,
+                "unknown": 0,
+                "codex_override": 0,
+                "codex_only_findings": 0,
+                "prs": set(),
             },
         )
         bucket["runs"] = int(bucket["runs"]) + 1
         cast_scores = bucket["scores"]
         assert isinstance(cast_scores, list)
         cast_scores.append(float(row["score"]))
+        cast_prs = bucket["prs"]
+        assert isinstance(cast_prs, set)
+        cast_prs.add(f"{row['owner']}/{row['repo']}#{row['pr_number']}")
         if row["fallback_switched"] == 1:
             bucket["fallback_true"] = int(bucket["fallback_true"]) + 1
         elif row["fallback_switched"] == 0:
             bucket["fallback_false"] = int(bucket["fallback_false"]) + 1
-        verdict = str(row["verdict"] or "")
-        cast_verdicts = bucket["verdicts"]
-        assert isinstance(cast_verdicts, dict)
-        cast_verdicts[verdict] = int(cast_verdicts.get(verdict, 0)) + 1
+        if row["codex_override"] == 1:
+            bucket["codex_override"] = int(bucket["codex_override"]) + 1
+        if row["codex_only_findings"] == 1:
+            bucket["codex_only_findings"] = int(bucket["codex_only_findings"]) + 1
+        verdict = normalized_verdict_label(str(row["verdict"] or ""))
+        bucket[verdict] = int(bucket.get(verdict, 0)) + 1
 
     scope = f" owner={args.owner}" if args.owner else ""
     if args.repo:
@@ -502,15 +568,16 @@ def cmd_provider_summary(args: argparse.Namespace) -> int:
     print(f"Provider summary{scope} recent_runs={len(runs)}")
     for provider, bucket in sorted(buckets.items(), key=lambda item: (-int(item[1]['runs']), item[0])):
         scores = bucket["scores"]
-        verdicts = bucket["verdicts"]
         assert isinstance(scores, list)
-        assert isinstance(verdicts, dict)
-        verdict_summary = ", ".join(f"{key or 'n/a'}={value}" for key, value in sorted(verdicts.items()))
+        prs = bucket["prs"]
+        assert isinstance(prs, set)
         print(
-            f"- {provider}: runs={bucket['runs']} avg_score={sum(scores) / len(scores):.2f} "
+            f"- {provider}: runs={bucket['runs']} unique_prs={len(prs)} avg_score={sum(scores) / len(scores):.2f} "
             f"min_score={min(scores):.2f} max_score={max(scores):.2f} "
             f"fallback_true={bucket['fallback_true']} fallback_false={bucket['fallback_false']} "
-            f"verdicts=[{verdict_summary}]"
+            f"approve={bucket['approve']} request_changes={bucket['request_changes']} "
+            f"comment={bucket['comment']} unknown={bucket['unknown']} "
+            f"codex_override={bucket['codex_override']} codex_only_findings={bucket['codex_only_findings']}"
         )
     return 0
 
@@ -571,6 +638,8 @@ def build_parser() -> argparse.ArgumentParser:
     record_parser.add_argument("--thinking-mode", default="")
     record_parser.add_argument("--reasoning-effort", default="")
     record_parser.add_argument("--fallback-switched", type=int, choices=[0, 1], default=None)
+    record_parser.add_argument("--codex-override", type=int, choices=[0, 1], default=None)
+    record_parser.add_argument("--codex-only-findings", type=int, choices=[0, 1], default=None)
     record_parser.add_argument("--local-review-path", default="")
     record_parser.add_argument("--score", type=float, required=True)
     record_parser.add_argument("--verdict", default="")
