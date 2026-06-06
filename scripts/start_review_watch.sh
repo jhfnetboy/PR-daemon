@@ -4,13 +4,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ENV_FILE="${PR_DAEMON_ENV_FILE:-$ROOT/.env}"
-if [ -f "$ENV_FILE" ]; then
-  set -a
-  # shellcheck disable=SC1090
-  . "$ENV_FILE"
-  set +a
-fi
+PR_DAEMON_ROOT="$ROOT"
+# shellcheck disable=SC1091
+. "$ROOT/scripts/load_pr_daemon_env.sh"
 STATE_DIR="${PR_DAEMON_STATE_DIR:-$HOME/.local/state/pr-daemon}"
 mkdir -p "$STATE_DIR"
 

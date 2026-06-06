@@ -94,6 +94,11 @@ PR_DAEMON_REVIEW_TOKEN=github_pat_xxx
 示例：
 
 ```bash
+PR_DAEMON_HTTPS_PROXY=
+PR_DAEMON_HTTP_PROXY=
+PR_DAEMON_ALL_PROXY=
+PR_DAEMON_NO_PROXY=127.0.0.1,localhost
+
 PR_DAEMON_FIRST_PASS_PROVIDER=deepseek
 PR_DAEMON_FIRST_PASS_BASE_URL=https://api.deepseek.com/v1
 PR_DAEMON_FIRST_PASS_MODEL=deepseek-v4-flash
@@ -106,6 +111,27 @@ PR_DAEMON_FALLBACK_MODEL=qwen3.6-a3b
 ```
 
 对 PR-Daemon 的 first-pass，我这里默认建议 `deepseek-v4-flash` 加 `thinking=disabled`。原因很简单：它更快，也更不容易把输出 token 用在 `reasoning_content` 上，适合做第一层 broad pass；最终严肃判断仍然交给 Codex。
+
+如果你的 `codex exec` 日志里出现这类错误：
+
+```text
+HTTP request failed: https://chatgpt.com/backend-api/wham/apps
+```
+
+这通常不是 DeepSeek 或 Rapid-MLX 的问题，而是 Codex CLI 自己连后端失败。PR-Daemon 不会自动读取 macOS 系统代理；要让 watcher 拉起的 `codex`、`gh`、`curl`、以及 first-pass HTTP 请求都走代理，请把代理写进 `.env`：
+
+```bash
+PR_DAEMON_HTTPS_PROXY=http://127.0.0.1:7890
+PR_DAEMON_HTTP_PROXY=http://127.0.0.1:7890
+PR_DAEMON_ALL_PROXY=socks5://127.0.0.1:7891
+PR_DAEMON_NO_PROXY=127.0.0.1,localhost
+```
+
+改完后重启 watcher：
+
+```bash
+./watch.sh restart
+```
 
 `.env` 已被 `.gitignore` 忽略，不会提交。发布脚本会用 `GH_TOKEN=$PR_DAEMON_REVIEW_TOKEN` 单次调用 GitHub API，默认 active account 仍保持 `jhfnetboy`。
 
