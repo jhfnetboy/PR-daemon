@@ -6,6 +6,7 @@ Requirements:
 - Codex must independently verify findings with code, diff, and commands.
 - Every review must end with a clear conclusion: APPROVE, REQUEST_CHANGES, or COMMENT.
 - Post the corresponding GitHub review/comment as clestons.
+- Never merge the PR, even after approval. Leave merge decisions to the PR author/maintainer.
 - Update PR-Daemon SQLite/Markdown records, including model score and improvement-item assessment.
 - Continue to treat local-model output as hypotheses, not final authority.
 

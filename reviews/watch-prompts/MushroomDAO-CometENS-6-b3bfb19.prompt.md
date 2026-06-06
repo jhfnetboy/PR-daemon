@@ -1,4 +1,4 @@
-Use $rapid-mlx-review to review MushroomDAO/demo-repository#1 in PR-Daemon autonomous watch mode.
+Use $rapid-mlx-review to review MushroomDAO/CometENS#6 in PR-Daemon autonomous watch mode.
 
 Requirements:
 - Use the local repository if available; never clone to /tmp unless no configured local checkout exists.
@@ -11,10 +11,10 @@ Requirements:
 - Continue to treat local-model output as hypotheses, not final authority.
 
 PR metadata:
-- title: Add workflow badges to README
-- url: https://github.com/MushroomDAO/demo-repository/pull/1
-- base: main
-- head: add-badges-to-readme
-- head_oid: 99f7d1ee03a2a2f069b8b9193ae5f1e34229d283
-- current_review_decision: APPROVED
-- latest_clestons_review: APPROVED
+- title: refactor: remove B2 plugin arch, D1 Durable Objects; disable D2 rate limiting
+- url: https://github.com/MushroomDAO/CometENS/pull/6
+- base: feat/milestone-bcd
+- head: refactor/cleanup-b2-d1
+- head_oid: b3bfb19fce3e2f21dfe9954d373674d0078a66c1
+- current_review_decision: 
+- latest_clestons_review:
