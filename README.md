@@ -2,6 +2,10 @@
 
 ## 中文版
 
+快速看 watcher / DeepSeek / Rapid-MLX 表现的命令和说明，见：
+
+- [REVIEW_OBSERVABILITY.md](./REVIEW_OBSERVABILITY.md)
+
 ### 产品定位
 
 PR-Daemon 是一个基于 Codex skill 的 PK 式 PR review 系统。核心思路是充分使用本机免费的 Apple Silicon 算力和本地常驻模型 `qwen3.6-a3b`：Rapid-MLX 负责加载模型并提供 OpenAI-compatible API，本地模型承担大量便宜但有价值的初审、归纳、反问、复核和 comment 草稿工作；Codex 只做最关键、最难、最需要资深判断的部分，并对最终 review 结论负责。
@@ -656,6 +660,37 @@ chmod -R u+rwX .git/refs/remotes .git/logs/refs/remotes
 ```
 
 如果普通 Terminal 能写、但 Codex 不能写，这是本次 Codex 沙箱限制。下次启动 Codex 时继续把仓库作为 writable workspace 加入即可；push 仍然可以成功，验证远端用 `git ls-remote`。
+
+同类问题也会出现在：
+
+```text
+.git/refs/tags/v0.3.0.lock: Operation not permitted
+```
+
+根因通常不是 git 配置错，而是当前 Codex 运行环境对 `.git` 只有读权限，不能创建新的 ref lock 文件。也就是说：
+
+- 改工作区文件可以
+- push 远端大多可以
+- 但本地更新 `refs/remotes/*`、`refs/tags/*`、某些本地 git 元数据时会失败
+
+这在当前受管沙盒里是权限边界，不是 PR-Daemon 代码逻辑问题。
+
+解决方法有两个：
+
+1. 在你自己的普通 Terminal 里执行本地 tag/ref 操作：
+
+```bash
+git tag -a v0.3.0 -m "PR-Daemon v0.3.0"
+git push origin v0.3.0
+```
+
+2. 如果只是想在远端创建 tag，不依赖本地 tag 对象，也可以直接推远端 ref：
+
+```bash
+git push origin COMMIT_SHA:refs/tags/v0.3.0
+```
+
+如果你希望 Codex 以后也能直接本地打 tag，根本办法不是改 PR-Daemon，而是让启动 Codex 的宿主环境允许写 `.git/refs`。在当前这个 managed sandbox 里，这个权限默认没有。
 
 #### 11. 普通人每天要做什么
 
