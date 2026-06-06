@@ -21,7 +21,12 @@ CREATE TABLE IF NOT EXISTS model_review_runs (
     pr_number INTEGER NOT NULL,
     pr_url TEXT,
     head_oid TEXT,
+    provider TEXT,
     model TEXT,
+    provider_base_url TEXT,
+    thinking_mode TEXT,
+    reasoning_effort TEXT,
+    fallback_switched INTEGER,
     local_review_path TEXT,
     score REAL NOT NULL,
     verdict TEXT,
@@ -73,6 +78,13 @@ ON model_improvement_assessments(improvement_item_id, created_at);
 """
 
 ALLOWED_ITEM_STATUSES = {"proposed", "effective", "ineffective", "needs_followup", "retired"}
+RUN_EXTRA_COLUMNS = {
+    "provider": "TEXT",
+    "provider_base_url": "TEXT",
+    "thinking_mode": "TEXT",
+    "reasoning_effort": "TEXT",
+    "fallback_switched": "INTEGER",
+}
 
 
 def connect(db_path: str) -> sqlite3.Connection:
@@ -81,7 +93,69 @@ def connect(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    existing_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(model_review_runs)").fetchall()
+    }
+    for column_name, column_type in RUN_EXTRA_COLUMNS.items():
+        if column_name not in existing_columns:
+            conn.execute(f"ALTER TABLE model_review_runs ADD COLUMN {column_name} {column_type}")
     return conn
+
+
+def parse_boolish(value: str) -> int | None:
+    normalized = value.strip().lower()
+    if normalized in {"true", "1", "yes"}:
+        return 1
+    if normalized in {"false", "0", "no"}:
+        return 0
+    return None
+
+
+def load_local_review_metadata(local_review_path: str) -> dict[str, object]:
+    if not local_review_path:
+        return {}
+    path = Path(local_review_path).expanduser()
+    if not path.is_file():
+        return {}
+
+    metadata: dict[str, object] = {}
+    key_map = {
+        "Provider": "provider",
+        "Model": "model",
+        "Base URL": "provider_base_url",
+        "Thinking Mode": "thinking_mode",
+        "Reasoning Effort": "reasoning_effort",
+        "Fallback Switched": "fallback_switched",
+    }
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if ":" not in line:
+            continue
+        label, value = line.split(":", 1)
+        label = label.strip()
+        if label not in key_map:
+            continue
+        parsed_value: object = value.strip()
+        if label == "Fallback Switched":
+            parsed_bool = parse_boolish(str(parsed_value))
+            parsed_value = parsed_bool if parsed_bool is not None else parsed_value
+        metadata[key_map[label]] = parsed_value
+    return metadata
+
+
+def normalized_provider_label(provider: str, model: str, local_review_path: str) -> str:
+    provider = (provider or "").strip()
+    model = (model or "").strip()
+    if not provider and local_review_path:
+        provider = str(load_local_review_metadata(local_review_path).get("provider", "")).strip()
+    candidate = provider or model or "unknown"
+    lowered = candidate.lower()
+    if "deepseek" in lowered:
+        return "deepseek"
+    if "rapid-mlx" in lowered or "qwen3.6-a3b" in lowered:
+        return "rapid-mlx"
+    return candidate
 
 
 def parse_list(value: str) -> list[str]:
@@ -152,16 +226,27 @@ def cmd_init(args: argparse.Namespace) -> int:
 def cmd_record_run(args: argparse.Namespace) -> int:
     next_items = parse_list(args.next_prompt_improvements)
     assessments = [parse_assessment(value) for value in args.assess_item]
+    local_review_metadata = load_local_review_metadata(args.local_review_path)
+    provider = args.provider or str(local_review_metadata.get("provider", ""))
+    model = args.model or str(local_review_metadata.get("model", ""))
+    provider_base_url = args.provider_base_url or str(local_review_metadata.get("provider_base_url", ""))
+    thinking_mode = args.thinking_mode or str(local_review_metadata.get("thinking_mode", ""))
+    reasoning_effort = args.reasoning_effort or str(local_review_metadata.get("reasoning_effort", ""))
+    fallback_switched = args.fallback_switched
+    if fallback_switched is None:
+        inferred_fallback = local_review_metadata.get("fallback_switched")
+        fallback_switched = inferred_fallback if isinstance(inferred_fallback, int) else None
     with connect(args.db) as conn:
         cursor = conn.execute(
             """
             INSERT INTO model_review_runs (
-                owner, repo, pr_number, pr_url, head_oid, model, local_review_path,
+                owner, repo, pr_number, pr_url, head_oid, provider, model,
+                provider_base_url, thinking_mode, reasoning_effort, fallback_switched, local_review_path,
                 score, verdict, summary, useful_findings, false_positives, misses,
                 prompt_gaps, prior_improvements_applied, prior_improvement_evaluation,
                 next_prompt_improvements, codex_adjudication, verification
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 args.owner,
@@ -169,7 +254,12 @@ def cmd_record_run(args: argparse.Namespace) -> int:
                 args.pr_number,
                 args.pr_url,
                 args.head_oid,
-                args.model,
+                provider,
+                model,
+                provider_base_url,
+                thinking_mode,
+                reasoning_effort,
+                fallback_switched,
                 args.local_review_path,
                 args.score,
                 args.verdict,
@@ -260,7 +350,7 @@ def cmd_scorecard(args: argparse.Namespace) -> int:
     with connect(args.db) as conn:
         runs = conn.execute(
             """
-            SELECT id, created_at, head_oid, score, verdict, prior_improvement_evaluation
+            SELECT id, created_at, head_oid, provider, model, local_review_path, fallback_switched, score, verdict, prior_improvement_evaluation
             FROM model_review_runs
             WHERE owner = ? AND repo = ? AND pr_number = ?
             ORDER BY id DESC
@@ -299,10 +389,47 @@ def cmd_scorecard(args: argparse.Namespace) -> int:
     print(f"recent_score_avg: {sum(scores) / len(scores):.2f}")
     print(f"recent_score_min: {min(scores):.2f}")
     print(f"recent_score_max: {max(scores):.2f}")
+    provider_counts: dict[str, int] = {}
+    provider_scores: dict[str, list[float]] = {}
+    fallback_true = 0
+    fallback_false = 0
+    for row in runs:
+        provider = normalized_provider_label(
+            str(row["provider"] or ""),
+            str(row["model"] or ""),
+            str(row["local_review_path"] or ""),
+        )
+        provider_counts[provider] = provider_counts.get(provider, 0) + 1
+        provider_scores.setdefault(provider, []).append(float(row["score"]))
+        if row["fallback_switched"] == 1:
+            fallback_true += 1
+        elif row["fallback_switched"] == 0:
+            fallback_false += 1
+    if provider_counts:
+        print("provider_summary:")
+        for provider, count in sorted(provider_counts.items(), key=lambda item: (-item[1], item[0])):
+            provider_avg = sum(provider_scores[provider]) / len(provider_scores[provider])
+            print(f"- {provider}: runs={count} avg_score={provider_avg:.2f}")
+    if fallback_true or fallback_false:
+        print(f"fallback_switched_true: {fallback_true}")
+        print(f"fallback_switched_false: {fallback_false}")
     print("runs:")
     for row in runs:
         head = (row["head_oid"] or "")[:7]
-        print(f"- #{row['id']} {row['created_at']} head={head} score={row['score']} verdict={row['verdict'] or ''}")
+        provider = normalized_provider_label(
+            str(row["provider"] or ""),
+            str(row["model"] or ""),
+            str(row["local_review_path"] or ""),
+        )
+        fallback_text = ""
+        if row["fallback_switched"] == 1:
+            fallback_text = " fallback=yes"
+        elif row["fallback_switched"] == 0:
+            fallback_text = " fallback=no"
+        print(
+            f"- #{row['id']} {row['created_at']} head={head} provider={provider}{fallback_text} "
+            f"score={row['score']} verdict={row['verdict'] or ''}"
+        )
         if row["prior_improvement_evaluation"]:
             print(f"  prior_improvement_evaluation: {row['prior_improvement_evaluation']}")
     if status_counts:
@@ -316,15 +443,92 @@ def cmd_scorecard(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_provider_summary(args: argparse.Namespace) -> int:
+    path = Path(args.db)
+    if not path.exists():
+        print("No model review runs recorded.")
+        return 0
+    with connect(args.db) as conn:
+        runs = conn.execute(
+            """
+            SELECT owner, repo, pr_number, created_at, provider, model, local_review_path,
+                   fallback_switched, score, verdict
+            FROM model_review_runs
+            WHERE (? = '' OR owner = ?)
+              AND (? = '' OR repo = ?)
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (args.owner, args.owner, args.repo, args.repo, args.limit),
+        ).fetchall()
+
+    if not runs:
+        print("No model review runs recorded.")
+        return 0
+
+    buckets: dict[str, dict[str, object]] = {}
+    for row in runs:
+        provider = normalized_provider_label(
+            str(row["provider"] or ""),
+            str(row["model"] or ""),
+            str(row["local_review_path"] or ""),
+        )
+        bucket = buckets.setdefault(
+            provider,
+            {
+                "runs": 0,
+                "scores": [],
+                "fallback_true": 0,
+                "fallback_false": 0,
+                "verdicts": {},
+            },
+        )
+        bucket["runs"] = int(bucket["runs"]) + 1
+        cast_scores = bucket["scores"]
+        assert isinstance(cast_scores, list)
+        cast_scores.append(float(row["score"]))
+        if row["fallback_switched"] == 1:
+            bucket["fallback_true"] = int(bucket["fallback_true"]) + 1
+        elif row["fallback_switched"] == 0:
+            bucket["fallback_false"] = int(bucket["fallback_false"]) + 1
+        verdict = str(row["verdict"] or "")
+        cast_verdicts = bucket["verdicts"]
+        assert isinstance(cast_verdicts, dict)
+        cast_verdicts[verdict] = int(cast_verdicts.get(verdict, 0)) + 1
+
+    scope = f" owner={args.owner}" if args.owner else ""
+    if args.repo:
+        scope += f" repo={args.repo}"
+    print(f"Provider summary{scope} recent_runs={len(runs)}")
+    for provider, bucket in sorted(buckets.items(), key=lambda item: (-int(item[1]['runs']), item[0])):
+        scores = bucket["scores"]
+        verdicts = bucket["verdicts"]
+        assert isinstance(scores, list)
+        assert isinstance(verdicts, dict)
+        verdict_summary = ", ".join(f"{key or 'n/a'}={value}" for key, value in sorted(verdicts.items()))
+        print(
+            f"- {provider}: runs={bucket['runs']} avg_score={sum(scores) / len(scores):.2f} "
+            f"min_score={min(scores):.2f} max_score={max(scores):.2f} "
+            f"fallback_true={bucket['fallback_true']} fallback_false={bucket['fallback_false']} "
+            f"verdicts=[{verdict_summary}]"
+        )
+    return 0
+
+
+def add_db_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--db", default=str(DEFAULT_DB), help="SQLite database path")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Record PR-Daemon local-model evaluations.")
-    parser.add_argument("--db", default=str(DEFAULT_DB), help="SQLite database path")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     init_parser = subparsers.add_parser("init", help="Initialize the SQLite schema")
+    add_db_argument(init_parser)
     init_parser.set_defaults(func=cmd_init)
 
     prior_parser = subparsers.add_parser("prior-context", help="Print prior improvements for prompt context")
+    add_db_argument(prior_parser)
     prior_parser.add_argument("--owner", required=True)
     prior_parser.add_argument("--repo", required=True)
     prior_parser.add_argument("--pr-number", type=int, required=True)
@@ -332,13 +536,22 @@ def build_parser() -> argparse.ArgumentParser:
     prior_parser.set_defaults(func=cmd_prior_context)
 
     scorecard_parser = subparsers.add_parser("scorecard", help="Summarize recent model-review quality and open improvement items")
+    add_db_argument(scorecard_parser)
     scorecard_parser.add_argument("--owner", required=True)
     scorecard_parser.add_argument("--repo", required=True)
     scorecard_parser.add_argument("--pr-number", type=int, required=True)
     scorecard_parser.add_argument("--limit", type=int, default=5)
     scorecard_parser.set_defaults(func=cmd_scorecard)
 
+    provider_summary_parser = subparsers.add_parser("provider-summary", help="Summarize recent review quality by first-pass provider")
+    add_db_argument(provider_summary_parser)
+    provider_summary_parser.add_argument("--owner", default="")
+    provider_summary_parser.add_argument("--repo", default="")
+    provider_summary_parser.add_argument("--limit", type=int, default=50)
+    provider_summary_parser.set_defaults(func=cmd_provider_summary)
+
     assess_parser = subparsers.add_parser("assess-item", help="Mark whether a prompt improvement item worked")
+    add_db_argument(assess_parser)
     assess_parser.add_argument("--item-id", type=int, required=True)
     assess_parser.add_argument("--status", choices=sorted(ALLOWED_ITEM_STATUSES), required=True)
     assess_parser.add_argument("--evaluation", required=True)
@@ -346,12 +559,18 @@ def build_parser() -> argparse.ArgumentParser:
     assess_parser.set_defaults(func=cmd_assess_item)
 
     record_parser = subparsers.add_parser("record-run", help="Insert one local-model evaluation run")
+    add_db_argument(record_parser)
     record_parser.add_argument("--owner", required=True)
     record_parser.add_argument("--repo", required=True)
     record_parser.add_argument("--pr-number", type=int, required=True)
     record_parser.add_argument("--pr-url", default="")
     record_parser.add_argument("--head-oid", default="")
+    record_parser.add_argument("--provider", default="")
     record_parser.add_argument("--model", default="")
+    record_parser.add_argument("--provider-base-url", default="")
+    record_parser.add_argument("--thinking-mode", default="")
+    record_parser.add_argument("--reasoning-effort", default="")
+    record_parser.add_argument("--fallback-switched", type=int, choices=[0, 1], default=None)
     record_parser.add_argument("--local-review-path", default="")
     record_parser.add_argument("--score", type=float, required=True)
     record_parser.add_argument("--verdict", default="")

@@ -1,13 +1,13 @@
 ---
 name: rapid-mlx-review
-description: Local-first code review workflow that uses a resident Rapid-MLX OpenAI-compatible server, exposed as qwen3.6-a3b, to perform broad first-pass review, summaries, challenge rounds, and comment drafting before Codex performs independent deep review, senior-risk analysis, adjudication, and final accountability. Use when the user asks for review, code review, PR review, repository review, diff review, or says to use local Rapid-MLX/local MLX/local A3B/local model first and then have Codex verify, compare, PK, challenge, or synthesize findings.
+description: Local-first code review workflow that uses a configurable first-pass OpenAI-compatible reviewer, preferring a remote provider such as DeepSeek when configured and falling back to a resident Rapid-MLX server exposed as qwen3.6-a3b, before Codex performs independent deep review, senior-risk analysis, adjudication, and final accountability. Use when the user asks for review, code review, PR review, repository review, diff review, or says to use local Rapid-MLX/local MLX/local A3B/local model first and then have Codex verify, compare, PK, challenge, or synthesize findings.
 ---
 
 # Rapid-MLX Review
 
 ## Overview
 
-Use local Rapid-MLX as a cheap, broad, always-on reviewer, then use Codex as the verifier and final reviewer. The local model should do as much volume work as possible: queue summaries, diff triage, first-pass findings, file summaries, reverse challenges, fix suggestions, and comment drafts. Codex must reserve attention for independent deep review, security and senior-risk analysis, final adjudication, and accountability. Treat local-model output as hypotheses only; never report a finding as final unless Codex can ground it in code paths, diffs, tests, or reproducible reasoning.
+Use a configurable first-pass reviewer as the cheap, broad reviewer, then use Codex as the verifier and final reviewer. Prefer a remote OpenAI-compatible provider such as DeepSeek when configured in `.env`; if it fails or quota is exhausted, fall back to the resident Rapid-MLX server. The first-pass model should do as much volume work as possible: queue summaries, diff triage, first-pass findings, file summaries, reverse challenges, fix suggestions, and comment drafts. Codex must reserve attention for independent deep review, security and senior-risk analysis, final adjudication, and accountability. Treat first-pass output as hypotheses only; never report a finding as final unless Codex can ground it in code paths, diffs, tests, or reproducible reasoning.
 
 ## Workflow
 

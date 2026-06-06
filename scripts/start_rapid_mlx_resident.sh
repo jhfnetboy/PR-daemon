@@ -4,6 +4,15 @@
 
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENV_FILE="${PR_DAEMON_ENV_FILE:-$ROOT/.env}"
+if [ -f "$ENV_FILE" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+  set +a
+fi
+
 HOST="${RAPID_MLX_HOST:-127.0.0.1}"
 PORT="${RAPID_MLX_PORT:-8000}"
 LOAD_MODEL="${RAPID_MLX_LOAD_MODEL:-qwen3.6-35b-6bit}"

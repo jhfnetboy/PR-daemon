@@ -47,6 +47,42 @@ HIDDEN_REASONING_MARKERS = [
 ]
 
 
+def discover_env_file() -> Path | None:
+    override = os.environ.get("PR_DAEMON_ENV_FILE")
+    candidates = []
+    if override:
+        candidates.append(Path(override).expanduser())
+    candidates.append(Path.cwd() / ".env")
+    candidates.append(Path(__file__).resolve().parents[3] / ".env")
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def load_env_file(path: Path | None) -> None:
+    if path is None:
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if value and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        value = os.path.expandvars(value)
+        os.environ.setdefault(key, value)
+
+
+load_env_file(discover_env_file())
+
+
 def review_quality_warnings(content: str, min_chars: int) -> list[str]:
     warnings: list[str] = []
     stripped = content.strip()
@@ -190,7 +226,16 @@ def chunk_text(text: str, max_chars: int) -> list[str]:
     return chunks
 
 
-def post_chat(base_url: str, model: str, messages: list[dict[str, str]], max_tokens: int, temperature: float) -> str:
+def post_chat(
+    base_url: str,
+    model: str,
+    api_key: str,
+    messages: list[dict[str, str]],
+    max_tokens: int,
+    temperature: float,
+    thinking_mode: str,
+    reasoning_effort: str,
+) -> str:
     url = base_url.rstrip("/") + "/chat/completions"
     payload = {
         "model": model,
@@ -198,18 +243,28 @@ def post_chat(base_url: str, model: str, messages: list[dict[str, str]], max_tok
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
+    if thinking_mode:
+        payload["thinking"] = {"type": thinking_mode}
+    if reasoning_effort:
+        payload["reasoning_effort"] = reasoning_effort
     data = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(
         url,
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     try:
         with urllib.request.urlopen(request, timeout=600) as response:
             body = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"provider request failed at {url}: HTTP {exc.code}: {detail}") from exc
     except urllib.error.URLError as exc:
-        raise RuntimeError(f"Rapid-MLX server is not reachable at {url}: {exc}") from exc
+        raise RuntimeError(f"provider is not reachable at {url}: {exc}") from exc
 
     try:
         return body["choices"][0]["message"]["content"]
@@ -217,7 +272,37 @@ def post_chat(base_url: str, model: str, messages: list[dict[str, str]], max_tok
         raise RuntimeError(f"Unexpected chat response: {body}") from exc
 
 
+def call_provider(
+    provider_name: str,
+    base_url: str,
+    model: str,
+    api_key: str,
+    messages: list[dict[str, str]],
+    max_tokens: int,
+    temperature: float,
+    thinking_mode: str,
+    reasoning_effort: str,
+) -> str:
+    try:
+        return post_chat(base_url, model, api_key, messages, max_tokens, temperature, thinking_mode, reasoning_effort)
+    except RuntimeError as exc:
+        raise RuntimeError(f"{provider_name}: {exc}") from exc
+
+
 def main() -> int:
+    default_primary_base_url = os.environ.get("PR_DAEMON_FIRST_PASS_BASE_URL", "")
+    default_primary_model = os.environ.get("PR_DAEMON_FIRST_PASS_MODEL", "")
+    default_primary_api_key = os.environ.get("PR_DAEMON_FIRST_PASS_API_KEY", "")
+    default_primary_name = os.environ.get("PR_DAEMON_FIRST_PASS_PROVIDER", "deepseek")
+    default_primary_thinking_mode = os.environ.get("PR_DAEMON_FIRST_PASS_THINKING", "disabled")
+    default_primary_reasoning_effort = os.environ.get("PR_DAEMON_FIRST_PASS_REASONING_EFFORT", "")
+    default_fallback_base_url = os.environ.get("PR_DAEMON_FALLBACK_BASE_URL", os.environ.get("RAPID_MLX_BASE_URL", "http://localhost:8000/v1"))
+    default_fallback_model = os.environ.get("PR_DAEMON_FALLBACK_MODEL", os.environ.get("RAPID_MLX_MODEL", "qwen3.6-a3b"))
+    default_fallback_api_key = os.environ.get("PR_DAEMON_FALLBACK_API_KEY", "")
+    default_fallback_name = os.environ.get("PR_DAEMON_FALLBACK_PROVIDER", "rapid-mlx")
+    default_fallback_thinking_mode = os.environ.get("PR_DAEMON_FALLBACK_THINKING", "")
+    default_fallback_reasoning_effort = os.environ.get("PR_DAEMON_FALLBACK_REASONING_EFFORT", "")
+
     parser = argparse.ArgumentParser(description="Run Rapid-MLX first-pass review on a git diff.")
     parser.add_argument("--repo", default=".", help="Repository path")
     parser.add_argument("--diff-file", default="", help="Review this diff file instead of generating a git diff")
@@ -225,8 +310,18 @@ def main() -> int:
     parser.add_argument("--base", default="origin/main", help="Base ref for review")
     parser.add_argument("--target", default="HEAD", help="Target ref for review")
     parser.add_argument("--worktree", action="store_true", help="Include staged and unstaged worktree changes")
-    parser.add_argument("--base-url", default=os.environ.get("RAPID_MLX_BASE_URL", "http://localhost:8000/v1"))
-    parser.add_argument("--model", default=os.environ.get("RAPID_MLX_MODEL", "qwen3.6-a3b"))
+    parser.add_argument("--base-url", default=default_primary_base_url, help="Primary first-pass provider base URL")
+    parser.add_argument("--model", default=default_primary_model, help="Primary first-pass provider model")
+    parser.add_argument("--api-key", default=default_primary_api_key, help="Primary first-pass provider API key")
+    parser.add_argument("--provider-name", default=default_primary_name, help="Primary first-pass provider label")
+    parser.add_argument("--thinking-mode", default=default_primary_thinking_mode, help="Primary provider thinking mode, e.g. disabled/enabled")
+    parser.add_argument("--reasoning-effort", default=default_primary_reasoning_effort, help="Primary provider reasoning effort")
+    parser.add_argument("--fallback-base-url", default=default_fallback_base_url, help="Fallback provider base URL")
+    parser.add_argument("--fallback-model", default=default_fallback_model, help="Fallback provider model")
+    parser.add_argument("--fallback-api-key", default=default_fallback_api_key, help="Fallback provider API key")
+    parser.add_argument("--fallback-provider-name", default=default_fallback_name, help="Fallback provider label")
+    parser.add_argument("--fallback-thinking-mode", default=default_fallback_thinking_mode, help="Fallback provider thinking mode")
+    parser.add_argument("--fallback-reasoning-effort", default=default_fallback_reasoning_effort, help="Fallback provider reasoning effort")
     parser.add_argument("--max-chars", type=int, default=45000, help="Approximate max diff chars per chunk")
     parser.add_argument("--max-tokens", type=int, default=3072, help="Max output tokens per local call")
     parser.add_argument("--temperature", type=float, default=0.1)
@@ -263,6 +358,15 @@ def main() -> int:
     reviews: list[str] = []
     quality_notes: list[str] = []
     started = time.strftime("%Y-%m-%d %H:%M:%S")
+    primary_enabled = bool(args.base_url and args.model)
+    provider_name = args.provider_name if primary_enabled else args.fallback_provider_name
+    provider_base_url = args.base_url if primary_enabled else args.fallback_base_url
+    provider_model = args.model if primary_enabled else args.fallback_model
+    provider_api_key = args.api_key if primary_enabled else args.fallback_api_key
+    provider_thinking_mode = args.thinking_mode if primary_enabled else args.fallback_thinking_mode
+    provider_reasoning_effort = args.reasoning_effort if primary_enabled else args.fallback_reasoning_effort
+    fallback_enabled = bool(args.fallback_base_url and args.fallback_model)
+    fallback_switched = False
 
     for index, chunk in enumerate(chunks, start=1):
         user_prompt = textwrap.dedent(
@@ -286,7 +390,47 @@ def main() -> int:
             """
         ).strip()
         messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user_prompt}]
-        content = post_chat(args.base_url, args.model, messages, args.max_tokens, args.temperature)
+        try:
+            content = call_provider(
+                provider_name,
+                provider_base_url,
+                provider_model,
+                provider_api_key,
+                messages,
+                args.max_tokens,
+                args.temperature,
+                provider_thinking_mode,
+                provider_reasoning_effort,
+            )
+        except RuntimeError as primary_exc:
+            can_fallback = fallback_enabled and (
+                provider_base_url != args.fallback_base_url or provider_model != args.fallback_model
+            )
+            if not can_fallback:
+                raise
+            print(
+                f"primary provider failed on chunk {index}/{len(chunks)}: {primary_exc}; "
+                f"falling back to {args.fallback_provider_name}",
+                file=sys.stderr,
+            )
+            provider_name = args.fallback_provider_name
+            provider_base_url = args.fallback_base_url
+            provider_model = args.fallback_model
+            provider_api_key = args.fallback_api_key
+            provider_thinking_mode = args.fallback_thinking_mode
+            provider_reasoning_effort = args.fallback_reasoning_effort
+            fallback_switched = True
+            content = call_provider(
+                provider_name,
+                provider_base_url,
+                provider_model,
+                provider_api_key,
+                messages,
+                args.max_tokens,
+                args.temperature,
+                provider_thinking_mode,
+                provider_reasoning_effort,
+            )
 
         warnings = review_quality_warnings(content, args.min_output_chars)
         for attempt in range(1, args.retry_incomplete + 1):
@@ -311,11 +455,14 @@ def main() -> int:
                 """
             ).strip()
             content = post_chat(
-                args.base_url,
-                args.model,
+                provider_base_url,
+                provider_model,
+                provider_api_key,
                 [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": retry_prompt}],
                 args.max_tokens,
                 args.temperature,
+                provider_thinking_mode,
+                provider_reasoning_effort,
             )
             warnings = review_quality_warnings(content, args.min_output_chars)
             print(f"retried chunk {index}/{len(chunks)} for output quality attempt {attempt}", file=sys.stderr)
@@ -330,14 +477,18 @@ def main() -> int:
         quality_block = "Quality warnings:\n" + "\n".join(f"- {note}" for note in quality_notes) + "\n"
     output = textwrap.dedent(
         f"""
-        # Rapid-MLX Local Review
+        # First-Pass Review
 
         Started: {started}
         Repository: {repo}
         Base: {args.base}
         Target: {args.target}
-        Model: {args.model}
-        Base URL: {args.base_url}
+        Provider: {provider_name}
+        Model: {provider_model}
+        Base URL: {provider_base_url}
+        Thinking Mode: {provider_thinking_mode or 'default'}
+        Reasoning Effort: {provider_reasoning_effort or 'default'}
+        Fallback Switched: {fallback_switched}
         Chunks: {len(chunks)}
         {quality_block}
 
