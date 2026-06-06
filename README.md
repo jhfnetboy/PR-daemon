@@ -85,6 +85,28 @@ PR_DAEMON_REVIEW_USER=clestons
 PR_DAEMON_REVIEW_TOKEN=github_pat_xxx
 ```
 
+第一梯队 reviewer 也建议在 `.env` 里一起配好。默认策略是：
+
+- 如果配置了 DeepSeek 这类 OpenAI-compatible API，就先用它做 broad first pass。
+- 如果主 provider 失败、限流、余额用尽或不可达，就自动回退到本地 Rapid-MLX。
+- Codex 的最终复核、GitHub review 发布、SQLite 记录逻辑不变。
+
+示例：
+
+```bash
+PR_DAEMON_FIRST_PASS_PROVIDER=deepseek
+PR_DAEMON_FIRST_PASS_BASE_URL=https://api.deepseek.com/v1
+PR_DAEMON_FIRST_PASS_MODEL=deepseek-v4-flash
+PR_DAEMON_FIRST_PASS_API_KEY=sk-...
+PR_DAEMON_FIRST_PASS_THINKING=disabled
+
+PR_DAEMON_FALLBACK_PROVIDER=rapid-mlx
+PR_DAEMON_FALLBACK_BASE_URL=http://127.0.0.1:8000/v1
+PR_DAEMON_FALLBACK_MODEL=qwen3.6-a3b
+```
+
+对 PR-Daemon 的 first-pass，我这里默认建议 `deepseek-v4-flash` 加 `thinking=disabled`。原因很简单：它更快，也更不容易把输出 token 用在 `reasoning_content` 上，适合做第一层 broad pass；最终严肃判断仍然交给 Codex。
+
 `.env` 已被 `.gitignore` 忽略，不会提交。发布脚本会用 `GH_TOKEN=$PR_DAEMON_REVIEW_TOKEN` 单次调用 GitHub API，默认 active account 仍保持 `jhfnetboy`。
 
 多组织 review token 规则：
@@ -124,8 +146,14 @@ Rapid-MLX 当前机器检查结果：
 
 - API 暴露名：`qwen3.6-a3b`
 - Rapid-MLX 默认加载 alias：`qwen3.6-35b-6bit`
+- 它对应的实际模型家族名就是 `Qwen3.6-35B-A3B-6bit`
 - 这个 alias 走 Rapid-MLX/Hugging Face cache 的原生解析能力。
 - 如果要从 `~/.omlx/models` 读模型，用 `RAPID_MLX_LOAD_MODEL` 显式指定本地路径。
+
+注意这里是两层名字：
+
+- `qwen3.6-a3b`：PR-Daemon 在 OpenAI-compatible API 里调用的 served model name
+- `qwen3.6-35b-6bit` / `Qwen3.6-35B-A3B-6bit`：Rapid-MLX 实际加载的模型
 
 如果你希望在 `~/.omlx/models` 里也能看到 6bit 模型，可以把 Hugging Face cache 里的 snapshot 暴露过去。推荐软链接模式，不重复占用 27GB：
 
@@ -216,13 +244,39 @@ Chat completions: http://127.0.0.1:8000/v1/chat/completions
 
 ### 一步步启动 24 小时 PR Review 系统
 
-这套系统分两层：Rapid-MLX 常驻模型负责便宜的初审，Python watcher 负责持续扫描 PR，Codex 负责最终复核并发布 GitHub review。Codex 即使 approve 也不会 merge PR。
+这套系统分两层：第一层 reviewer 负责便宜的初审，优先使用 `.env` 里配置的 DeepSeek 之类 OpenAI-compatible API；如果主 provider 不可用，就自动回退到本地 Rapid-MLX。Python watcher 负责持续扫描 PR，Codex 负责最终复核并发布 GitHub review。Codex 即使 approve 也不会 merge PR。
 
 #### 1. 进入 PR-Daemon
 
 ```bash
 cd /Users/jason/Dev/tools/PR-Daemon
 ```
+
+第一次在新机器或新 clone 上启动，先做一次初始化：
+
+```bash
+./scripts/bootstrap_pr_daemon.sh
+```
+
+它会创建：
+
+- `.state/pr-daemon/`
+- `.state/pr-daemon/pr-watch.sqlite`
+- `reviews/model-evals/model-evals.sqlite`
+- `reviews/watch-prompts/`
+
+常用包装命令：
+
+```bash
+./run.sh
+./watch.sh restart
+./watch.sh status
+./watch.sh queue
+./watch.sh current
+./watch.sh stop
+```
+
+这些入口脚本会自动读取仓库根目录 `.env`。
 
 #### 2. 检查 GitHub 账号
 
@@ -274,6 +328,12 @@ scripts/start_rapid_mlx_resident.sh
 scripts/rapid_mlx_daemon.sh status
 ```
 
+如果你就是想开一个带好目录权限的 Codex，会话入口也可以直接用：
+
+```bash
+./run.sh
+```
+
 日志默认写入：
 
 ```text
@@ -286,7 +346,7 @@ $HOME/.local/state/pr-daemon/rapid-mlx-8000.log
 PR_DAEMON_MAX_LOG_BYTES=$((100 * 1024 * 1024)) scripts/start_rapid_mlx_resident.sh
 ```
 
-如果模型已经在跑，Codex/watcher 会复用 `http://127.0.0.1:8000/v1`。
+如果模型已经在跑，Codex/watcher 会把它当作 fallback reviewer 复用 `http://127.0.0.1:8000/v1`。
 
 #### 5. 先跑一次安全扫描
 
@@ -299,7 +359,7 @@ python3 scripts/review_watch.py --max-reviews-per-cycle 3
 查看扫描结果：
 
 ```bash
-sqlite3 reviews/pr-watch.sqlite \
+sqlite3 .state/pr-daemon/pr-watch.sqlite \
   'select repo, pr_number, status, review_decision, substr(head_oid,1,7), title from pr_watch_targets order by last_seen_at desc limit 20;'
 ```
 
@@ -320,23 +380,85 @@ scripts/start_review_watch.sh
 查看 watcher 日志：
 
 ```bash
-tail -f "$HOME/.local/state/pr-daemon/review-watch.log"
+tail -f .state/pr-daemon/review-watch.log
 ```
 
 停止 watcher：
 
 ```bash
-kill "$(cat "$HOME/.local/state/pr-daemon/review-watch.pid")"
+scripts/start_review_watch.sh stop
 ```
+
+查看当前 watcher 是不是 auto-review 模式：
+
+```bash
+scripts/start_review_watch.sh status
+```
+
+`status` 现在除了 pid/meta，还会附带当前 runtime 状态，例如：
+
+- `active_review=owner/repo#pr`
+- `loop_state=scan_start|refreshed|cycle_complete|idle|blocked_active_review`
+- `processed_reviews=N`
+- `updated_at=...`
+
+查看当前队列状态：
+
+```bash
+./watch.sh queue
+```
+
+这里第一段会显示 `last_full_sync_epoch`，用来判断 watcher 最近一次全量远端刷新是什么时候。
+
+查看当前正在审的 PR：
+
+```bash
+./watch.sh current
+```
+
+`watch.sh` 默认会把 watcher 的 pid、log、runtime SQLite 都放到仓库里的 `.state/pr-daemon/`，避免污染 Git 和避免 `$HOME/.local/state` 权限差异。
+
+查看当前 PR 最近一次 first-pass 到底用了哪个 provider：
+
+```bash
+./watch.sh first-pass
+./watch.sh first-pass MushroomDAO/Cos72 2
+```
+
+这会直接打印最近一份 `local-review` 产物里的 `Provider`、`Model`、`Fallback Switched` 等头信息。`Provider: deepseek` 且 `Fallback Switched: False` 表示这次 broad first pass 确实走了 DeepSeek，没有回退到本地 Rapid-MLX。
+
+如果你改了下面这些文件，需要重启 watcher 才会生效：
+
+- `scripts/review_watch.py`
+- `scripts/start_review_watch.sh`
+- `watch.sh`
+
+命令：
+
+```bash
+./watch.sh restart
+```
+
+如果只是改了 `scripts/model_eval_db.py`，不需要专门重启 watcher；后续新的 review run 会自动用新逻辑写入评分记录。
+
+如果 watcher 主进程不在了，但 `current-review.json` 还在，新的 watcher 会先进入 `blocked_active_review`，暂时不拿新的 PR，避免重复 review 同一条。默认超过 `PR_DAEMON_ACTIVE_REVIEW_STALE_SECONDS=14400`（4 小时）的 `current-review.json` 会被当作 stale 自动清掉。
 
 #### 7. 启动 canary 自动 review
 
-确认安全扫描正常后，再启用自动 review。建议先一次循环最多处理 1 个 PR：
+确认安全扫描正常后，再启用自动 review。`./watch.sh` 现在默认是更实用的节流：
+
+- `PR_DAEMON_MAX_REVIEWS_PER_CYCLE=3`
+- `PR_DAEMON_WATCH_INTERVAL=30`
+
+也就是每轮最多连续处理 3 个 PR，处理完后只等 30 秒再继续下一轮。
+
+如果你想显式指定，命令是：
 
 ```bash
 PR_DAEMON_AUTO_REVIEW=1 \
-PR_DAEMON_MAX_REVIEWS_PER_CYCLE=1 \
-scripts/start_review_watch.sh
+PR_DAEMON_MAX_REVIEWS_PER_CYCLE=3 \
+PR_DAEMON_WATCH_INTERVAL=30 \
+./watch.sh restart
 ```
 
 想先看它会启动什么命令，不真正调用 Codex：
@@ -344,24 +466,93 @@ scripts/start_review_watch.sh
 ```bash
 PR_DAEMON_AUTO_REVIEW=1 \
 PR_DAEMON_DRY_RUN=1 \
-scripts/start_review_watch.sh
+PR_DAEMON_MAX_REVIEWS_PER_CYCLE=3 \
+PR_DAEMON_WATCH_INTERVAL=30 \
+./watch.sh restart
+```
+
+注意：这里必须写成一条命令前缀，不要写成下面这种形式：
+
+```bash
+PR_DAEMON_AUTO_REVIEW=1 && PR_DAEMON_DRY_RUN=0 && ./scripts/start_review_watch.sh
+```
+
+那样只是在当前 shell 里设置了变量，不保证传给已经存在的 watcher 进程。正确写法是：
+
+```bash
+PR_DAEMON_AUTO_REVIEW=1 PR_DAEMON_DRY_RUN=0 PR_DAEMON_MAX_REVIEWS_PER_CYCLE=3 PR_DAEMON_WATCH_INTERVAL=30 ./watch.sh restart
 ```
 
 #### 8. 循环如何工作
 
-- watcher 扫描 `~/.config/prbot/repos.conf` 里的 repo scope，并写入 `reviews/pr-watch.sqlite`。
+这套系统不是“本地模型先把所有 PR 批量 review 一遍，再统一叫一次 Codex”。当前实现是“扫描是批量的，真正 review 是逐个 PR 调一次 Codex”。
+
+- DeepSeek 之类主 provider 只负责 first-pass API 调用，本身不扫描 PR，也不发 GitHub review。
+- Rapid-MLX 只负责本地 fallback first-pass API，本身不扫描 PR，也不发 GitHub review。
+- watcher 先把远端 open PR 扫描入库，写入运行时队列库 `.state/pr-daemon/pr-watch.sqlite`。
+- 之后优先按 SQLite 里的状态队列逐个处理，不会每一轮都重新全量扫描远端。
+- 只有当队列空了，或者到了 `refresh_interval`，watcher 才会再做一次全量远端刷新。
 - 新 PR、没有 review 的 PR、head commit 变化的 PR 会进入队列。
-- watcher 启动 `codex exec` 处理一个具体 PR。
-- Codex 用本地模型做 broad pass，再独立复核源码、diff、测试和历史 SQL 改进项。
-- Codex 必须发布 GitHub review/comment，并把结果写回 Markdown 和 SQLite。
+- watcher 对每个排队 PR 先生成一个 prompt 文件，再单独启动一次 `codex exec`。
+- 这个 Codex review 进程内部会先调用配置好的 first-pass reviewer；默认优先走 DeepSeek，失败后回退到本地 Rapid-MLX；然后再由 Codex 自己复核源码、diff、测试和历史 SQL 改进项。
+- Codex 必须发布 GitHub review/comment，并把本地模型评分和复盘写回 Markdown/SQLite。
 - 如果是 `REQUEST_CHANGES`，watcher 等 PR 作者 push 新 commit 后再复审。
 - 如果最终 `APPROVE`，Codex 仍然禁止 merge；PR 作者或 maintainer 看完 comment 后自己 merge。
 - PR merge 后，GitHub 内置 `delete_branch_on_merge=true` 会删除远端分支。
+
+流程图：
+
+```mermaid
+flowchart TD
+    A[watcher loop] --> B[scan open PRs]
+    B --> C[write runtime queue sqlite]
+    C --> D[pick one queued PR]
+    D --> E[write prompt file]
+    E --> F[launch one codex exec]
+    G[Rapid-MLX resident server] --> H[local model broad pass]
+    F --> H
+    H --> I[Codex deep verification]
+    I --> J[post GitHub review as clestons]
+    J --> K[write markdown and eval sqlite]
+    K --> L[wait for next PR or next head change]
+```
+
+什么时候会调用本地模型：
+
+- 只有当 watcher 已经挑中某一个 PR，并且成功启动了对应的 `codex exec`，first-pass reviewer 才会被调用。
+- 单纯“watcher 在扫描”不会调用本地模型。
+- 单纯“prompt 已生成”也不会调用 first-pass reviewer，只有真正进入那个 PR 的 Codex review 进程才会调用。
+- 如果主 provider 正常，这一轮可能完全不会打到本地 Rapid-MLX；只有主 provider 失败时才会回退到本地模型。
+
+怎么看本地模型有没有被调用：
+
+```bash
+tail -f .state/pr-daemon/review-watch.log
+```
+
+看到 `LAUNCH owner/repo #123 ...`，表示 watcher 已经开始拉起该 PR 的 Codex review。
+
+如果 `LAUNCH` 后面紧接着是 Codex CLI 自身错误，说明问题发生在“启动 Codex review”这一步，还没真正进入本地模型调用。
+
+```bash
+./watch.sh current
+```
+
+如果有输出 JSON，表示当前有一个 PR 正在被 Codex 处理。
+
+```bash
+scripts/rapid_mlx_daemon.sh status
+tail -f "$HOME/.local/state/pr-daemon/rapid-mlx-8000.log"
+```
+
+前者确认模型服务活着；后者用来观察 Rapid-MLX 服务日志是否持续有请求。
 
 #### 9. 查看本地模型是否变好
 
 ```bash
 python3 scripts/model_eval_db.py scorecard --owner AAStarCommunity --repo AirAccount --pr-number 34 --limit 5
+python3 scripts/model_eval_db.py provider-summary --limit 50
+python3 scripts/model_eval_db.py provider-summary --owner MushroomDAO --limit 20
 ```
 
 每次 review 都会记录：
@@ -372,6 +563,41 @@ python3 scripts/model_eval_db.py scorecard --owner AAStarCommunity --repo AirAcc
 - 它漏掉的问题。
 - 上一次改进项这次是否真的改善。
 - 下一次 prompt 应强化什么。
+
+`provider-summary` 用来跨 PR 看 first-pass provider 的整体表现，例如 `deepseek` 和 `rapid-mlx` 的平均分、fallback 次数和 verdict 分布。
+
+#### 9.1 数据库初始化和重建
+
+从零初始化：
+
+```bash
+./scripts/bootstrap_pr_daemon.sh
+```
+
+只重建 runtime watch DB，不动历史评分库：
+
+```bash
+./scripts/reset_pr_daemon_state.sh
+```
+
+连 `reviews/model-evals/model-evals.sqlite` 也一起重建：
+
+```bash
+./scripts/reset_pr_daemon_state.sh --wipe-model-eval-db
+```
+
+如果你只想手动初始化某个库，也可以直接跑：
+
+```bash
+python3 scripts/review_watch.py --db .state/pr-daemon/pr-watch.sqlite --init-db
+python3 scripts/model_eval_db.py init --db reviews/model-evals/model-evals.sqlite
+```
+
+注意这里 `model_eval_db.py` 的 `--db` 写在子命令后面：
+
+```bash
+python3 scripts/model_eval_db.py scorecard --db reviews/model-evals/model-evals.sqlite --owner MushroomDAO --repo Cos72 --pr-number 2
+```
 
 #### 10. 本地 `origin/main.lock` 权限问题
 
@@ -410,8 +636,8 @@ chmod -R u+rwX .git/refs/remotes .git/logs/refs/remotes
 正常情况下只要做三件事：
 
 1. 开一个 Terminal 跑 `scripts/start_rapid_mlx_resident.sh`。
-2. 开另一个 Terminal 跑 `PR_DAEMON_AUTO_REVIEW=1 PR_DAEMON_MAX_REVIEWS_PER_CYCLE=1 scripts/start_review_watch.sh`。
-3. 定期看 `review-watch.log`、GitHub PR comments、以及 `model_eval_db.py scorecard`。
+2. 开另一个 Terminal 跑 `./watch.sh restart`。
+3. 定期看 `./watch.sh queue`、`./watch.sh current`、`tail -f .state/pr-daemon/review-watch.log`、GitHub PR comments、以及 `model_eval_db.py scorecard`。
 
 ### 每次怎么用
 

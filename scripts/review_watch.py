@@ -12,6 +12,7 @@ import subprocess
 import sys
 import textwrap
 import time
+import traceback
 from pathlib import Path
 
 
@@ -58,6 +59,11 @@ CREATE TABLE IF NOT EXISTS pr_watch_events (
     head_oid TEXT,
     event_type TEXT NOT NULL,
     details TEXT
+);
+
+CREATE TABLE IF NOT EXISTS pr_watch_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 """
 
@@ -110,10 +116,31 @@ def read_scopes(path: Path) -> list[str]:
 
 def connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 30000")
+    conn.execute("PRAGMA journal_mode = WAL")
     conn.executescript(SCHEMA)
     return conn
+
+
+def get_meta(conn: sqlite3.Connection, key: str) -> str:
+    row = conn.execute(
+        "SELECT value FROM pr_watch_meta WHERE key = ?",
+        (key,),
+    ).fetchone()
+    return str(row["value"]) if row else ""
+
+
+def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        """
+        INSERT INTO pr_watch_meta (key, value)
+        VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        (key, value),
+    )
 
 
 def search_scope(scope: str, limit: int) -> list[dict[str, object]]:
@@ -239,7 +266,7 @@ def build_prompt(row: sqlite3.Row) -> str:
 
         Requirements:
         - Use the local repository if available; never clone to /tmp unless no configured local checkout exists.
-        - Use qwen3.6-a3b through Rapid-MLX for broad pass, prior-finding verification, adversarial cases, and comment draft.
+        - Use the configured first-pass reviewer for broad pass, prior-finding verification, adversarial cases, and comment draft. Prefer DeepSeek via the repo .env when configured; otherwise use Rapid-MLX. If the primary provider fails, fall back to Rapid-MLX.
         - Codex must independently verify findings with code, diff, and commands.
         - Every review must end with a clear conclusion: APPROVE, REQUEST_CHANGES, or COMMENT.
         - Post the corresponding GitHub review/comment as clestons.
@@ -278,14 +305,96 @@ def mark_prompt(conn: sqlite3.Connection, row: sqlite3.Row, path: Path) -> None:
     )
 
 
-def launch_codex(row: sqlite3.Row, prompt_path: Path, dry_run: bool) -> None:
+def mark_reviewing(conn: sqlite3.Connection, row: sqlite3.Row) -> None:
+    conn.execute(
+        """
+        UPDATE pr_watch_targets
+        SET status = 'reviewing'
+        WHERE repo = ? AND pr_number = ?
+        """,
+        (row["repo"], row["pr_number"]),
+    )
+
+
+def refresh_review_state(conn: sqlite3.Connection, repo: str, pr_number: int) -> None:
+    viewed = view_pr(repo, pr_number)
+    clestons_state = latest_clestons_state(viewed)
+    state = str(viewed.get("state") or "")
+    review_decision = str(viewed.get("reviewDecision") or "")
+    head_oid = str(viewed.get("headRefOid") or "")
+
+    if state != "OPEN":
+        status = state.lower() or "closed"
+    elif clestons_state == "APPROVED":
+        status = "approved"
+    elif clestons_state == "CHANGES_REQUESTED":
+        status = "changes_requested"
+    elif clestons_state == "COMMENTED":
+        status = "commented"
+    else:
+        status = "prompt_ready"
+
+    conn.execute(
+        """
+        UPDATE pr_watch_targets
+        SET head_oid = ?,
+            review_decision = ?,
+            last_reviewed_head_oid = ?,
+            last_review_event = ?,
+            last_reviewed_at = CURRENT_TIMESTAMP,
+            last_seen_at = CURRENT_TIMESTAMP,
+            status = ?
+        WHERE repo = ? AND pr_number = ?
+        """,
+        (head_oid, review_decision, head_oid, clestons_state, status, repo, pr_number),
+    )
+
+
+def write_current_review(path: Path, row: sqlite3.Row, prompt_path: Path) -> None:
+    payload = {
+        "repo": row["repo"],
+        "pr_number": row["pr_number"],
+        "title": row["title"],
+        "head_oid": row["head_oid"],
+        "prompt_path": str(prompt_path),
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
+
+
+def clear_current_review(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def current_review_age_seconds(path: Path) -> float:
+    return max(0.0, time.time() - path.stat().st_mtime)
+
+
+def write_watcher_state(state_path: Path, **payload: object) -> None:
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    current: dict[str, object] = {}
+    if state_path.is_file():
+        try:
+            loaded = json.loads(state_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                current = loaded
+        except json.JSONDecodeError:
+            current = {}
+    current.update(payload)
+    current["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    state_path.write_text(json.dumps(current, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
+
+
+def launch_codex(row: sqlite3.Row, prompt_path: Path, dry_run: bool) -> int:
     cmd = [
         "codex",
         "exec",
-        "-a",
-        "never",
-        "--sandbox",
+        "-s",
         "workspace-write",
+        "-c",
+        "sandbox_workspace_write.network_access=true",
         "--cd",
         str(Path.cwd()),
         "--add-dir",
@@ -298,7 +407,124 @@ def launch_codex(row: sqlite3.Row, prompt_path: Path, dry_run: bool) -> None:
     ]
     print("LAUNCH", row["repo"], f"#{row['pr_number']}", shlex.join(cmd[:12]), "...")
     if not dry_run:
-        subprocess.run(cmd, check=False)
+        result = subprocess.run(cmd, check=False)
+        return result.returncode
+    return 0
+
+
+def queue_count(conn: sqlite3.Connection) -> int:
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM pr_watch_targets
+        WHERE status IN ('needs_review', 'prompt_ready', 'reviewing')
+          AND is_draft = 0
+        """
+    ).fetchone()
+    return int(row["count"]) if row else 0
+
+
+def next_queue_item(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT *
+        FROM pr_watch_targets
+        WHERE status IN ('prompt_ready', 'needs_review')
+          AND is_draft = 0
+        ORDER BY
+          CASE status
+            WHEN 'prompt_ready' THEN 0
+            WHEN 'needs_review' THEN 1
+            ELSE 2
+          END,
+          last_seen_at DESC
+        LIMIT 1
+        """
+    ).fetchone()
+
+
+def should_refresh(conn: sqlite3.Connection, refresh_interval: int) -> bool:
+    last_sync = get_meta(conn, "last_full_sync_epoch")
+    if not last_sync:
+        return True
+    try:
+        age = time.time() - int(last_sync)
+    except ValueError:
+        return True
+    return age >= refresh_interval
+
+
+def refresh_from_remote(conn: sqlite3.Connection, args: argparse.Namespace, scopes: list[str]) -> int:
+    seen = 0
+    for scope in scopes:
+        for item in search_scope(scope, args.limit_per_scope):
+            repo_info = item.get("repository") or {}
+            repo = repo_info.get("nameWithOwner") if isinstance(repo_info, dict) else ""
+            number = int(item.get("number") or 0)
+            try:
+                status, _ = upsert_pr(conn, item)
+                seen += 1
+                print(f"{status:16} {repo}#{number} {item.get('title')}")
+            except RuntimeError as exc:
+                conn.execute(
+                    """
+                    INSERT INTO pr_watch_events (repo, pr_number, event_type, details)
+                    VALUES (?, ?, 'scan_error', ?)
+                    """,
+                    (repo, number, str(exc)),
+                )
+                print(f"{'scan_error':16} {repo}#{number} {exc}", file=sys.stderr)
+    set_meta(conn, "last_full_sync_epoch", str(int(time.time())))
+    return seen
+
+
+def process_queue(conn: sqlite3.Connection, args: argparse.Namespace, current_review: Path) -> int:
+    row = next_queue_item(conn)
+    if row is None:
+        return 0
+
+    if not args.write_prompts_dir:
+        return 0
+
+    path = Path(row["last_prompt_path"]) if row["status"] == "prompt_ready" and row["last_prompt_path"] else None
+    if path is None or not path.exists():
+        path = write_prompt(row, Path(args.write_prompts_dir))
+        mark_prompt(conn, row, path)
+        print(f"PROMPT {path}")
+
+    if args.auto_review:
+        if args.dry_run:
+            launch_codex(row, path, True)
+        else:
+            returncode = -1
+            mark_reviewing(conn, row)
+            write_current_review(current_review, row, path)
+            try:
+                returncode = launch_codex(row, path, False)
+            except Exception as exc:
+                mark_prompt(conn, row, path)
+                conn.execute(
+                    """
+                    INSERT INTO pr_watch_events (repo, pr_number, head_oid, event_type, details)
+                    VALUES (?, ?, ?, 'launch_error', ?)
+                    """,
+                    (row["repo"], row["pr_number"], row["head_oid"], f"launch exception: {exc}"),
+                )
+                print(f"launch_error     {row['repo']}#{row['pr_number']} {exc}", file=sys.stderr)
+            finally:
+                clear_current_review(current_review)
+            if returncode == 0:
+                refresh_review_state(conn, row["repo"], row["pr_number"])
+            elif returncode != -1:
+                mark_prompt(conn, row, path)
+                conn.execute(
+                    """
+                    INSERT INTO pr_watch_events (repo, pr_number, head_oid, event_type, details)
+                    VALUES (?, ?, ?, 'launch_error', ?)
+                    """,
+                    (row["repo"], row["pr_number"], row["head_oid"], f"codex exit code {returncode}"),
+                )
+    return 1
 
 
 def scan(args: argparse.Namespace) -> int:
@@ -311,42 +537,51 @@ def scan(args: argparse.Namespace) -> int:
 
     seen = 0
     with connect(Path(args.db)) as conn:
-        for scope in scopes:
-            for item in search_scope(scope, args.limit_per_scope):
-                repo_info = item.get("repository") or {}
-                repo = repo_info.get("nameWithOwner") if isinstance(repo_info, dict) else ""
-                number = int(item.get("number") or 0)
-                try:
-                    status, _ = upsert_pr(conn, item)
-                    seen += 1
-                    print(f"{status:16} {repo}#{number} {item.get('title')}")
-                except RuntimeError as exc:
-                    conn.execute(
-                        """
-                        INSERT INTO pr_watch_events (repo, pr_number, event_type, details)
-                        VALUES (?, ?, 'scan_error', ?)
-                        """,
-                        (repo, number, str(exc)),
-                    )
-                    print(f"{'scan_error':16} {repo}#{number} {exc}", file=sys.stderr)
+        current_review = Path(args.db).parent / "current-review.json"
+        watcher_state = Path(args.db).parent / "watcher-state.json"
+        write_watcher_state(watcher_state, loop_state="scan_start")
+        if current_review.exists():
+            age_seconds = current_review_age_seconds(current_review)
+            if age_seconds < args.active_review_stale_seconds:
+                write_watcher_state(
+                    watcher_state,
+                    loop_state="blocked_active_review",
+                    active_review_age_seconds=round(age_seconds, 1),
+                    seen_open_prs=0,
+                    processed_reviews=0,
+                )
+                print(
+                    f"active_review_block {current_review} age_seconds={age_seconds:.1f}; "
+                    "skipping new queue work until it clears",
+                    file=sys.stderr,
+                )
+                print("seen_open_prs: 0")
+                return 0
+            print(
+                f"stale_active_review {current_review} age_seconds={age_seconds:.1f}; clearing stale marker",
+                file=sys.stderr,
+            )
+            clear_current_review(current_review)
+            write_watcher_state(
+                watcher_state,
+                loop_state="cleared_stale_active_review",
+                active_review_age_seconds=round(age_seconds, 1),
+            )
+        if queue_count(conn) == 0 or should_refresh(conn, args.refresh_interval):
+            seen = refresh_from_remote(conn, args, scopes)
+            write_watcher_state(watcher_state, loop_state="refreshed", seen_open_prs=seen)
 
-        queue = conn.execute(
-            """
-            SELECT * FROM pr_watch_targets
-            WHERE status = 'needs_review'
-              AND is_draft = 0
-            ORDER BY last_seen_at DESC
-            LIMIT ?
-            """,
-            (args.max_reviews_per_cycle,),
-        ).fetchall()
-        for row in queue:
-            if args.write_prompts_dir:
-                path = write_prompt(row, Path(args.write_prompts_dir))
-                mark_prompt(conn, row, path)
-                print(f"PROMPT {path}")
-                if args.auto_review:
-                    launch_codex(row, path, args.dry_run)
+        processed = 0
+        for _ in range(args.max_reviews_per_cycle):
+            processed += process_queue(conn, args, current_review)
+            if processed == 0:
+                break
+        write_watcher_state(
+            watcher_state,
+            loop_state="idle" if processed == 0 else "cycle_complete",
+            seen_open_prs=seen,
+            processed_reviews=processed,
+        )
 
     print(f"seen_open_prs: {seen}")
     return 0
@@ -356,21 +591,36 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="PR-Daemon watch loop for autonomous reviews.")
     parser.add_argument("--config", default=str(DEFAULT_PRBOT_CONFIG), help="prbot repos.conf path")
     parser.add_argument("--db", default=str(DEFAULT_DB), help="SQLite watch DB path")
+    parser.add_argument("--init-db", action="store_true", help="Initialize the watch SQLite schema and exit")
     parser.add_argument("--scope", action="append", default=[], help="Org or owner/repo; repeatable")
     parser.add_argument("--limit-per-scope", type=int, default=200)
     parser.add_argument("--max-reviews-per-cycle", type=int, default=3)
+    parser.add_argument("--refresh-interval", type=int, default=3600, help="Seconds between full remote refresh scans")
     parser.add_argument("--write-prompts-dir", default="reviews/watch-prompts")
     parser.add_argument("--auto-review", action="store_true", help="Launch codex exec for queued PRs")
     parser.add_argument("--dry-run", action="store_true", help="Print codex command without launching")
     parser.add_argument("--loop", action="store_true", help="Run forever")
     parser.add_argument("--interval", type=int, default=900, help="Loop interval seconds")
+    parser.add_argument(
+        "--active-review-stale-seconds",
+        type=int,
+        default=int(os.environ.get("PR_DAEMON_ACTIVE_REVIEW_STALE_SECONDS", "14400")),
+        help="Treat current-review.json older than this as stale and clear it",
+    )
     args = parser.parse_args()
+
+    if args.init_db:
+        with connect(Path(args.db)):
+            pass
+        print(args.db)
+        return 0
 
     while True:
         try:
             scan(args)
-        except RuntimeError as exc:
+        except Exception as exc:
             print(f"error: {exc}", file=sys.stderr)
+            traceback.print_exc()
             if not args.loop:
                 return 1
         if not args.loop:
