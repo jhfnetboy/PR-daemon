@@ -59,6 +59,23 @@ You (Claude Code as primary reviewer) run a closed autonomous loop:
 
 Never modify business code. Never merge. Post only after approval or in autonomous mode.
 
+## Mandatory Per-PR Completion Checklist
+
+Before posting ANY review, you MUST answer YES to ALL of these:
+
+```
+[ ] Did I read the actual diff for THIS PR?                (not from memory, not from the list scan)
+[ ] Did I form independent findings from the diff?          (not copied from another PR)
+[ ] Did I invoke Agent(codex:codex-rescue) PK challenge?    (MANDATORY — not skipped, not "obvious")
+[ ] Did I read Codex's response and adjudicate each item?   (not just the summary)
+[ ] Did I write a review with individual findings?          (not "looks good" / "LGTM")
+[ ] Did I post via post_pr_review.sh?                       (not gh pr review or gh pr comment directly)
+[ ] Did I record results via model_eval_db.py record-run?   (Mandatory — even for trivial APPROVEs)
+[ ] Did I update pr_watch_targets status in SQLite?         (Mandatory — sets last_reviewed_head_oid)
+```
+
+If any box is unchecked → go back to that step and complete it. **No "bulk done" shortcuts.**
+
 ## Loop Entry
 
 When the user starts the daemon, announce:
