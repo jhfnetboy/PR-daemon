@@ -1,0 +1,4 @@
+interface:
+  display_name: "PK Review"
+  short_description: "DeepSeek-powered deep review with Codex PK challenge"
+  default_prompt: "Use $pk-review to review this repository. Read the diff independently, form findings, then invoke Codex as PK challenger. Own the final verdict and summarize the combined result."
