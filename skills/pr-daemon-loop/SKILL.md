@@ -126,30 +126,31 @@ python3 skills/pk-review/scripts/local_review.py \
 
 Merge any new findings from the breadth pass into your list.
 
-## Step 4 — PK Challenge Round (Codex as Adversarial Challenger)
+## Step 4 — PK Challenge Round (Codex as Adversarial Challenger) — MANDATORY
 
-Compose a structured challenge prompt with your findings and invoke Codex:
+**Use the Agent tool with `subagent_type: "codex:rescue"` — NOT `codex exec` CLI.**  
+`codex exec` spawns a fresh sandbox with 30–90s cold-start per call. The Agent tool uses the shared runtime and returns in seconds.
 
-```bash
-codex exec \
-  -s workspace-write \
-  -c sandbox_workspace_write.network_access=true \
-  --cd /Users/jason/Dev/tools/PR-Daemon \
-  --add-dir /Users/jason/Dev/aastar \
-  --add-dir /Users/jason/Dev/auraai \
-  --add-dir /Users/jason/Dev/mycelium \
-  "PK CHALLENGE: You are the adversarial reviewer for OWNER/REPO#PR_NUMBER.
+```
+Agent(
+  subagent_type = "codex:rescue",
+  prompt = """
+PK CHALLENGE: You are the adversarial reviewer for OWNER/REPO#PR_NUMBER.
 
-Read the diff and then adversarially challenge this finding list:
+Read the diff with: gh pr diff PR_NUMBER --repo OWNER/REPO --patch
 
-$(paste_your_finding_list_here)
+Then adversarially challenge this finding list:
 
-For each finding, return one of:
+<paste_your_finding_list_here>
+
+For each finding, return EXACTLY ONE of:
 - [CHALLENGE] <finding> — reason the evidence does NOT support it, or it is a false positive
 - [CONFIRM] <finding> — independent evidence confirms this is real
 - [MISSED] <new finding> — something the primary reviewer missed
 
-Do NOT post anything to GitHub. Return ONLY your structured critique."
+Do NOT post anything to GitHub. Return ONLY your structured critique.
+"""
+)
 ```
 
 Read Codex's response. For each item:

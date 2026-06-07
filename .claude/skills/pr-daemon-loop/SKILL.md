@@ -128,25 +128,29 @@ python3 PR_DAEMON_ROOT/skills/pk-review/scripts/local_review.py \
 
 **This step is required for every single PR review. Do not skip even if confident. No review may be posted without a completed PK challenge round.**
 
-Once findings are stable, invoke Codex to challenge them:
+**Use the Agent tool with `subagent_type: "codex:rescue"` — NOT `codex exec` CLI. The CLI spawns a fresh sandbox with 30–90s cold-start overhead; the Agent tool uses the shared runtime and is much faster.**
 
-```bash
-codex exec \
-  -s workspace-write \
-  -c sandbox_workspace_write.network_access=true \
-  --cd PR_DAEMON_ROOT \
-  "PK CHALLENGE for OWNER/REPO#N:
+Invoke the Agent tool (not Bash) with this prompt:
 
-Read the diff (gh pr diff N --repo OWNER/REPO --patch) and adversarially challenge:
+```
+Agent(
+  subagent_type = "codex:rescue",
+  prompt = """
+PK CHALLENGE for OWNER/REPO#N:
 
-$(YOUR_FINDING_LIST)
+Read the diff with: gh pr diff N --repo OWNER/REPO --patch
 
-For each finding return:
+Adversarially challenge each finding below. For each, return EXACTLY ONE of:
 - [CHALLENGE] <finding> — counter-evidence or false-positive reason
 - [CONFIRM] <finding> — independent supporting evidence
 - [MISSED] <new finding> — real issue not in the list
 
-Do NOT post anything to GitHub. Return ONLY the structured critique."
+Findings to challenge:
+<YOUR_FINDING_LIST_HERE>
+
+Do NOT post anything to GitHub. Return ONLY the structured critique.
+"""
+)
 ```
 
 Read the critique. Accept valid challenges (mark Rejected). Verify Missed items independently. Max 2 rounds.

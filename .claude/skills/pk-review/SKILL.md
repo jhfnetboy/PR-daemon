@@ -46,23 +46,29 @@ Read diff and changed file context. Focus on: correctness bugs, security, concur
 
 **This step is required for every review. Do not skip even if you are confident in the findings.**
 
-```bash
-codex exec \
-  -s workspace-write \
-  -c sandbox_workspace_write.network_access=true \
-  --cd PR_DAEMON_ROOT \
-  "PK CHALLENGE for OWNER/REPO#N:
+**Use the Agent tool with `subagent_type: "codex:rescue"` — do NOT use `codex exec` CLI (it spawns a fresh sandbox and is 30–90s slower).**
 
-Read the diff (gh pr diff N --repo OWNER/REPO --patch) and adversarially challenge each finding below:
+Invoke the Agent tool like this (pseudocode — use it as the Agent tool call, not Bash):
 
-$(YOUR_FINDINGS)
+```
+Agent(
+  subagent_type = "codex:rescue",
+  prompt = """
+PK CHALLENGE for OWNER/REPO#N:
 
-For each finding return EXACTLY ONE of:
+Read the diff with: gh pr diff N --repo OWNER/REPO --patch
+
+Adversarially challenge each finding below. For each, return EXACTLY ONE of:
 - [CHALLENGE] <finding> — counter-evidence or false-positive reason
-- [CONFIRM] <finding> — independent supporting evidence
+- [CONFIRM] <finding> — independent supporting evidence  
 - [MISSED] <new finding> — real issue not in the list
 
-Do NOT post anything to GitHub. Return ONLY the structured critique."
+Findings to challenge:
+<YOUR_FINDINGS_HERE>
+
+Do NOT post anything to GitHub. Return ONLY the structured critique.
+"""
+)
 ```
 
 After receiving the critique:
