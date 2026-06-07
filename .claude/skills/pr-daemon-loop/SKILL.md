@@ -11,11 +11,22 @@ path of the PR-Daemon repo. When used directly in the project, run from the PR-D
 
 # PR Daemon Loop
 
-> ⛔ **ABSOLUTE CONSTRAINT — READ FIRST**
+> ⛔ **ABSOLUTE CONSTRAINT #1 — No Merge**
 > PR-Daemon is a **review-only** system. It MUST NEVER merge any PR under any circumstances.
 > Even if the verdict is APPROVE, merging is the PR author's or maintainer's sole decision.
 > Do not run `gh pr merge`, do not click merge, do not trigger any merge operation — ever.
 > Allowed GitHub write operations: post review comment / request changes / approve. Nothing else.
+>
+> ⛔ **ABSOLUTE CONSTRAINT #2 — PR must be reviewed individually, one at a time**
+> Each PR goes through the FULL 7-step loop independently. Do NOT batch-scan many PRs and
+> produce bulk APPROVEs. Even a trivial PR (typo fix, readme edit) gets individual treatment:
+> read the diff → form findings → PK challenge → post → record. A trivial PR's PK round can be
+> quick, but it MUST exist.
+>
+> ⛔ **ABSOLUTE CONSTRAINT #3 — PK is NEVER optional**
+> Every single PR review MUST go through Step 4 (PK Challenge via Codex) before posting.
+> No exceptions based on confidence, triviality, volume, or the number of remaining PRs.
+> If Codex is unavailable, retry or wait — do not proceed without PK.
 
 ## Configuration
 
@@ -106,6 +117,8 @@ gh pr diff PR_NUMBER --repo OWNER/REPO --patch > /tmp/pr-diff.patch
 ```
 
 ## Step 3 — Deep Review
+
+**One PR at a time. NEVER batch-review multiple PRs together. NEVER bulk-approve a list of PRs.**
 
 Read the diff. Then read the changed functions and their immediate callers. Focus on:
 
@@ -212,7 +225,9 @@ sqlite3 "$PR_DAEMON_STATE_DIR/pr-watch.sqlite" \
 
 ## Step 7 — Loop
 
-After recording, move to the next queued PR immediately. When all queued PRs are done:
+**After recording, move to the next queued PR — one at a time.** Do not skip to "finish off" remaining PRs without review. Each PR gets its own individual Step 3 → Step 4 → Step 5 → Step 6, in order.
+
+When all queued PRs are done:
 
 1. Re-scan GitHub for new or head-changed PRs (back to Step 1).
 2. If nothing new: `sleep 300` (5 min), then scan again.
@@ -224,6 +239,8 @@ Continue until the user explicitly stops with Ctrl+C or says "stop the daemon".
 
 - **NEVER MERGE** any PR — not even after APPROVE. `gh pr merge` is forbidden. Merging belongs to the PR author/maintainer only.
 - **PK challenge is MANDATORY** — every PR review MUST invoke Codex as adversarial challenger (Step 4) before any post. No exceptions.
+- **NO BATCH REVIEWS** — each PR goes through the full 7-step loop individually. Do not scan multiple PRs and bulk-approve them.
+- **NO SKIPPING PK** — not for trivial PRs, not for confidence, not for volume. If Codex is down, retry or wait.
 - **Never modify** business repo source, config, tests, or lock files.
 - **Never post** via `gh pr review` directly — always use `post_pr_review.sh`.
 - **Never rely on `@me`** — always use `--author $PR_DAEMON_MAIN_USER`.
