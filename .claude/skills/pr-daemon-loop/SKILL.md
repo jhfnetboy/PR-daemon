@@ -27,6 +27,13 @@ path of the PR-Daemon repo. When used directly in the project, run from the PR-D
 > Every single PR review MUST go through Step 4 (PK Challenge via Codex) before posting.
 > No exceptions based on confidence, triviality, volume, or the number of remaining PRs.
 > If Codex is unavailable, retry or wait — do not proceed without PK.
+>
+> ⛔ **ABSOLUTE CONSTRAINT #4 — Double Review for PRs >100 lines changed**
+> If a PR's total diff exceeds **100 lines** (additions + deletions), run a **second PK round**
+> after the first round is complete and findings are adjudicated. Round 2 sends the ADJUDICATED
+> findings (with what was confirmed/rejected/added) back to Codex for a final adversarial pass.
+> This catches mistakes in the first round's adjudication. Round 2 report is included in the final review.
+> Count lines: `gh pr diff N --repo OWNER/REPO | wc -l`
 
 ## Configuration
 
@@ -194,7 +201,26 @@ Do NOT post anything to GitHub. Return ONLY the structured critique.
 )
 ```
 
-Read the critique. Accept valid challenges (mark Rejected). Verify Missed items independently. Max 2 rounds.
+Read the critique. Accept valid challenges (mark Rejected). Verify Missed items independently.
+
+**Double Review Rule — PRs with >100 lines changed:**
+```bash
+# Check diff size BEFORE review
+LINES=$(gh pr diff N --repo OWNER/REPO | wc -l)
+if [ "$LINES" -gt 100 ]; then
+  echo "PR超过100行($LINES lines)，需要double review"
+fi
+```
+If diff >100 lines, after adjudicating Round 1 findings, invoke a **second PK round** sending the adjudicated results back:
+```
+Agent(subagent_type="codex:codex-rescue", prompt="""
+PK CHALLENGE ROUND 2 for OWNER/REPO#N:
+Re-examine the adjudicated findings from Round 1. Challenge any CONFIRMED findings that may still be wrong. Look for new MISSED issues overlooked by Round 1.
+ADJUDICATED FINDINGS: <paste adjudicated list with Confirmed/Rejected/PK-added>
+""")
+```
+Incorporate Round 2 results into the final review. Mark Round 2 challenges/additions separately.
+Normal PRs (≤100 lines): max 2 rounds total (one PK round). Double-review PRs (>100 lines): exactly 2 PK rounds required.
 
 ## Step 5 — Post as Review Account
 
@@ -322,6 +348,7 @@ Continue until the user explicitly stops with Ctrl+C or says "stop the daemon".
 - **PK challenge is MANDATORY** — every PR review MUST invoke Codex as adversarial challenger (Step 4) before any post. No exceptions.
 - **NO BATCH REVIEWS** — each PR goes through the full 7-step loop individually. Do not scan multiple PRs and bulk-approve them.
 - **NO SKIPPING PK** — not for trivial PRs, not for confidence, not for volume. If Codex is down, retry or wait.
+- **DOUBLE REVIEW for PRs >100 lines** — two mandatory PK rounds for large PRs. Check `gh pr diff N --repo OWNER/REPO | wc -l` before review.
 - **Never modify** business repo source, config, tests, or lock files.
 - **Never post** via `gh pr review` directly — always use `post_pr_review.sh`.
 - **Never rely on `@me`** — always use `--author $PR_DAEMON_MAIN_USER`.
