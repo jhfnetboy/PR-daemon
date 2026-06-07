@@ -2,22 +2,33 @@
 
 ## 中文版
 
-快速看 watcher / DeepSeek / Rapid-MLX 表现的命令和说明，见：
+快速看 review 表现和 observability 命令，见：
 
 - [REVIEW_OBSERVABILITY.md](./REVIEW_OBSERVABILITY.md)
 
 ### 产品定位
 
-PR-Daemon 是一个基于 Codex skill 的 PK 式 PR review 系统。核心思路是充分使用本机免费的 Apple Silicon 算力和本地常驻模型 `qwen3.6-a3b`：Rapid-MLX 负责加载模型并提供 OpenAI-compatible API，本地模型承担大量便宜但有价值的初审、归纳、反问、复核和 comment 草稿工作；Codex 只做最关键、最难、最需要资深判断的部分，并对最终 review 结论负责。
+PR-Daemon 是一个以 **Claude Code（DeepSeek 后端）为主力 reviewer** 的 24/7 全自动 PK 式 PR review 系统，覆盖 aastar / auraai / mycelium 三个组织。
 
-默认原则：
+**三层架构（每次 review 必须全部走完）：**
 
-- 默认只 review，不修改 PR 分支代码。
-- 任何时候禁止直接更改本地业务仓库代码；本地 checkout 只作为 review 上下文。
-- 允许在业务仓库外写临时 diff/report；如必须在业务仓库内生成临时文件，必须放在明确的临时/ignored 路径，不能改源码、配置、测试或锁文件。
-- 默认只生成本地 review 文案，不直接发 GitHub comment。
-- 只有用户明确批准后，才用 review 账号发布 comment、approve 或 request changes。
-- 本地模型输出是高价值假设，不是最终结论；最终结论必须由 Codex 用代码、diff、测试或可复现推理确认。
+| 层级 | 承担者 | 职责 |
+|------|--------|------|
+| Tier 1 主 reviewer | Claude Code（`run-dpsk-claude.sh` 路由到 DeepSeek API） | 深度阅读 diff 和上下文，独立形成 findings，主导最终裁决 |
+| Tier 2 PK 挑战者（**必须**） | Codex（Claude Code 内部通过 `codex exec` 调用） | 以对抗方式挑战 Tier 1 的每一个 finding，禁止跳过 |
+| Tier 3 可选广度扫描 | `skills/pk-review/scripts/local_review.py` via DeepSeek API | 先于 Tier 1 跑一遍宽广扫描，输出作为假设供 Tier 1 参考 |
+
+**核心约束（不可妥协）：**
+
+- **每次 review 必须经过 Codex PK 挑战环节（Tier 2）**，不可跳过，不可因"findings 已很明显"而省略。
+- 只 review，不修改任何 PR 分支代码。
+- 本地业务仓库 checkout 只用作 review 上下文，不改源码、配置、测试或锁文件。
+- 只有用户明确批准后，才用 review 账号（`clestons`）发布 GitHub review。
+- 禁止 merge PR，即使 review 结果是 APPROVE，最终 merge 由 PR 作者或 maintainer 决定。
+- 发布任何 GitHub review 必须通过 `scripts/post_pr_review.sh`，不可直接调用 `gh pr review`。
+
+**为什么用 DeepSeek 而不直接用 Claude API：**
+DeepSeek 提供与 Anthropic API 完全兼容的端点（`https://api.deepseek.com/anthropic`），`run-dpsk-claude.sh` 通过 `ANTHROPIC_BASE_URL` 将 Claude Code CLI 的所有请求路由到 DeepSeek，以极低成本（约 1/10）获得与 Claude Code 相同的能力。Codex 作为独立进程单独调用，不参与路由。
 
 ### 账号分工
 
@@ -157,9 +168,12 @@ bash scripts/post_pr_review.sh \
   --request-changes
 ```
 
-### 本地模型常驻
+### 可选：本地模型（离线 fallback）
 
-目标 API model name 是：
+**本节为可选项**。主力架构已改为 Claude Code + DeepSeek API，不依赖本地 GPU。  
+Rapid-MLX 本地模型仅在 DeepSeek API 不可用时用作 fallback first-pass，不影响主流程。
+
+如需启用本地模型，目标 API model name 是：
 
 ```text
 qwen3.6-a3b
@@ -272,17 +286,43 @@ Models: http://127.0.0.1:8000/v1/models
 Chat completions: http://127.0.0.1:8000/v1/chat/completions
 ```
 
-### 一步步启动 24 小时 PR Review 系统
+### 快速启动：5 步上线 24 小时 PR Review
 
-这套系统分两层：第一层 reviewer 负责便宜的初审，优先使用 `.env` 里配置的 DeepSeek 之类 OpenAI-compatible API；如果主 provider 不可用，就自动回退到本地 Rapid-MLX。Python watcher 负责持续扫描 PR，Codex 负责最终复核并发布 GitHub review。Codex 即使 approve 也不会 merge PR。
-
-#### 1. 进入 PR-Daemon
+#### 第 0 步：Clone 仓库
 
 ```bash
-cd /Users/jason/Dev/tools/PR-Daemon
+git clone https://github.com/jhfnetboy/PR-Daemon.git
+cd PR-Daemon
 ```
 
-第一次在新机器或新 clone 上启动，先做一次初始化：
+已有 clone 的跳到第 1 步。
+
+#### 第 1 步：配置 .env
+
+```bash
+cp env.example .env
+```
+
+打开 `.env`，最少填以下三项即可运行：
+
+```bash
+DEEPSEEK_API_KEY=sk-...             # DeepSeek API Key，主 reviewer 后端
+PR_DAEMON_REVIEW_TOKEN=ghp_...      # clestons 的 GitHub classic PAT（发布 review 用）
+PR_DAEMON_REVIEW_USER=clestons      # 发布 review 的 GitHub 账号（默认 clestons）
+```
+
+代理（如果需要）：
+
+```bash
+PR_DAEMON_HTTPS_PROXY=http://127.0.0.1:7890
+PR_DAEMON_HTTP_PROXY=http://127.0.0.1:7890
+```
+
+`.env` 已被 `.gitignore` 忽略，不会提交，可放心填真实密钥。
+
+#### 第 2 步：初始化 SQLite 数据库
+
+一次性初始化，创建所有运行时数据库和目录：
 
 ```bash
 ./scripts/bootstrap_pr_daemon.sh
@@ -290,25 +330,100 @@ cd /Users/jason/Dev/tools/PR-Daemon
 
 它会创建：
 
-- `.state/pr-daemon/`
-- `.state/pr-daemon/pr-watch.sqlite`
-- `reviews/model-evals/model-evals.sqlite`
-- `reviews/watch-prompts/`
+| 路径 | 用途 |
+|------|------|
+| `.state/pr-daemon/pr-watch.sqlite` | 运行时 PR 队列（状态机） |
+| `reviews/model-evals/model-evals.sqlite` | Review 评分历史（改进反馈循环） |
+| `reviews/watch-prompts/` | dispatch prompt 目录 |
 
-常用包装命令：
+手动检查 SQLite 结构（可选）：
 
 ```bash
-./run.sh
-./watch.sh restart
-./watch.sh status
-./watch.sh queue
-./watch.sh current
-./watch.sh stop
+sqlite3 .state/pr-daemon/pr-watch.sqlite ".tables"
+sqlite3 reviews/model-evals/model-evals.sqlite ".tables"
 ```
 
-这些入口脚本会自动读取仓库根目录 `.env`。
+#### 第 3 步：安装 Claude Code Skills
 
-#### 2. 检查 GitHub 账号
+**项目级**（当前仓库下的 Claude Code 会话自动可见，无需额外操作）：
+
+```bash
+./install-skills.sh            # 验证 .claude/skills/ 已就绪
+```
+
+**全局安装**（在任何目录下的 Claude Code 会话都可用）：
+
+```bash
+./install-skills.sh --global   # 复制到 ~/.claude/skills/ 并替换绝对路径
+```
+
+卸载全局安装：
+
+```bash
+./uninstall-skills.sh
+```
+
+Skill 功能说明：
+
+| Skill | 调用方式 | 用途 |
+|-------|----------|------|
+| `pr-daemon-loop` | `$pr-daemon-loop` | 24/7 全自动 loop：发现 PR → 深度 review → Codex PK → 发布 |
+| `pk-review` | `$pk-review` | 单个 PR 的完整 PK review |
+
+#### 第 4 步：验证 GitHub 账号
+
+```bash
+gh api user -q .login    # 必须返回 jhfnetboy（主账号）
+```
+
+如果不是，切回主账号：
+
+```bash
+bash scripts/ensure_main_github_account.sh
+```
+
+#### 第 5 步：启动！
+
+```bash
+./run-dpsk-claude.sh
+```
+
+Claude Code 启动后，直接说（支持语音）：
+
+```
+Use $pr-daemon-loop to start the 24/7 review loop
+```
+
+或无人值守（headless）模式：
+
+```bash
+./run-dpsk-claude.sh -p "Use pr-daemon-loop. Start the continuous PR review daemon for jhfnetboy's open PRs across aastar, auraai, and mycelium. Post reviews as clestons. Run until stopped."
+```
+
+**到这里就跑起来了。** Claude Code 会持续发现 PR、深度 review、调 Codex PK 挑战、发布 review，直到你 Ctrl+C。
+
+---
+
+### 日常 Observability 命令
+
+```bash
+./watch.sh status        # watcher 状态
+./watch.sh queue         # SQLite 队列（按状态分组）
+./watch.sh current       # 当前正在 review 的 PR（JSON）
+tail -f .state/pr-daemon/review-watch.log  # 实时日志
+
+python3 scripts/model_eval_db.py provider-summary --limit 50   # 各 provider 评分汇总
+python3 scripts/model_eval_db.py scorecard --owner OWNER --repo REPO --pr-number N  # 单 PR 评分
+```
+
+---
+
+### 高级参考：Python Watcher 模式（可选）
+
+以下内容为旧版 Python watcher 驱动的启动方式，供参考。  
+**新架构下主流程是 `run-dpsk-claude.sh` + `$pr-daemon-loop`，不需要单独启动 watcher。**
+
+#### 检查 GitHub 账号
 
 默认账号应该是 `jhfnetboy`：
 
@@ -328,7 +443,7 @@ bash scripts/ensure_main_github_account.sh
 test -f .env && grep -E '^PR_DAEMON_REVIEW_USER=|^PR_DAEMON_REVIEW_TOKEN=' .env
 ```
 
-#### 3. 检查本地业务仓库
+#### 检查本地业务仓库
 
 不要重复 clone。PR-Daemon 会优先使用这些本地路径：
 
