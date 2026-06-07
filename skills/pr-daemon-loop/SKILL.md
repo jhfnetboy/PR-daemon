@@ -342,6 +342,42 @@ When all queued PRs are done:
 
 Continue until the user explicitly stops with Ctrl+C or says "stop the daemon".
 
+## Mandatory 15-Minute Status Report
+
+Every 15 minutes during the loop, pause and print a status report in this EXACT format:
+
+```
+═══════════════════════════════════════════════════════════
+  PR Daemon Status  •  <current time>
+═══════════════════════════════════════════════════════════
+
+📊 PR status: open N, reviewed M [changes: X, approve: Y, else: Z]
+
+This Session (本轮 loop)
+  Round 1 — <category> (N PRs)
+    ✅ repo#N  verdict  score=XX
+    ...
+
+  Round 2 — <category> (N PRs)
+    ...
+
+  ⏳ 待 review (N):
+    • repo#N  (description)
+
+💰 DeepSeek V4 Pro · Cumulative
+  Total: ~N tokens ≈ $X.XX
+  Per-PR avg: ~N tokens ≈ $X.XX
+
+🛡️ PK Stats
+  N/N PRs PK'ed (100%)
+  Double review: N PRs
+  PK MISSED findings: N
+═══════════════════════════════════════════════════════════
+```
+
+The first report prints after 15 minutes of loop runtime. Repeat every 15 minutes thereafter.
+Also print this report whenever the user asks for status or invokes `$pr-daemon-status`.
+
 ## Hard Rules
 
 - **NEVER MERGE** any PR — not even after APPROVE. `gh pr merge` is forbidden. Merging belongs to the PR author/maintainer only.
@@ -349,7 +385,8 @@ Continue until the user explicitly stops with Ctrl+C or says "stop the daemon".
 - **NO BATCH REVIEWS** — each PR goes through the full 7-step loop individually. Do not scan multiple PRs and bulk-approve them.
 - **NO SKIPPING PK** — not for trivial PRs, not for confidence, not for volume. If Codex is down, retry or wait.
 - **DOUBLE REVIEW for PRs >100 lines** — two mandatory PK rounds for large PRs. Check `gh pr diff N --repo OWNER/REPO | wc -l` before review.
-- **Never modify** business repo source, config, tests, or lock files.
+- **Never merge** business repo source, config, tests, or lock files.
+- **COMMENT verdict is discouraged** — always push the PR forward. If the PR is good, APPROVE (add notes as comment text). If there are real issues, REQUEST_CHANGES. A pure COMMENT traps the PR in limbo.
 - **Never post** via `gh pr review` directly — always use `post_pr_review.sh`.
 - **Never rely on `@me`** — always use `--author $PR_DAEMON_MAIN_USER`.
 - **Verify `gh api user -q .login` equals `$PR_DAEMON_MAIN_USER`** after every GitHub operation.

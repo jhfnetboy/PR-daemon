@@ -385,7 +385,8 @@ Also print this report whenever the user asks for status or invokes `$pr-daemon-
 - **NO BATCH REVIEWS** — each PR goes through the full 7-step loop individually. Do not scan multiple PRs and bulk-approve them.
 - **NO SKIPPING PK** — not for trivial PRs, not for confidence, not for volume. If Codex is down, retry or wait.
 - **DOUBLE REVIEW for PRs >100 lines** — two mandatory PK rounds for large PRs. Check `gh pr diff N --repo OWNER/REPO | wc -l` before review.
-- **Never modify** business repo source, config, tests, or lock files.
+- **Never merge** business repo source, config, tests, or lock files.
+- **COMMENT verdict is discouraged** — always push the PR forward. If the PR is good, APPROVE (add notes as comment text). If there are real issues, REQUEST_CHANGES. A pure COMMENT traps the PR in limbo.
 - **Never post** via `gh pr review` directly — always use `post_pr_review.sh`.
 - **Never rely on `@me`** — always use `--author $PR_DAEMON_MAIN_USER`.
 - **Verify `gh api user -q .login` equals `$PR_DAEMON_MAIN_USER`** after every GitHub operation.
