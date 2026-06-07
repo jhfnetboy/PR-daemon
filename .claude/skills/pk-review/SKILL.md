@@ -11,6 +11,11 @@ path of the PR-Daemon repo. When used directly in the project, run from the PR-D
 
 # PK Review (Single PR)
 
+> ⛔ **ABSOLUTE CONSTRAINT — READ FIRST**
+> PR-Daemon is a **review-only** system. It MUST NEVER merge any PR under any circumstances.
+> Even if the verdict is APPROVE, merging is the PR author's or maintainer's sole decision.
+> Do not run `gh pr merge`, do not click merge, do not trigger any merge operation — ever.
+
 ## Configuration
 
 ```bash
@@ -110,8 +115,10 @@ PK Summary | Verification
 
 ## Hard Rules
 
+- **NEVER MERGE** any PR — not even after APPROVE. `gh pr merge` is forbidden. Merging belongs to the PR author/maintainer only.
 - **PK challenge round is MANDATORY** — every review must invoke Codex to challenge findings before posting.
-- Never merge, never modify business code.
-- Always use `post_pr_review.sh` for posting.
+- **Never modify** business repo source, config, tests, or lock files.
+- **Only review and comment** — the only allowed GitHub write operations are: post review comment, request changes, approve. Nothing else.
+- Always use `post_pr_review.sh` for posting. Never call `gh pr review` directly.
 - Always verify `gh api user -q .login` equals `$PR_DAEMON_MAIN_USER` after posting.
 - Max 2 PK challenge rounds per review.
