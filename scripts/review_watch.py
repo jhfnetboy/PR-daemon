@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import shlex
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -163,6 +164,7 @@ def view_pr(repo: str, number: int) -> dict[str, object]:
 
 
 def latest_clestons_state(pr: dict[str, object]) -> str:
+    review_user = os.environ.get("PR_DAEMON_REVIEW_USER", "clestons")
     latest_reviews = pr.get("latestReviews")
     if not isinstance(latest_reviews, list):
         return ""
@@ -170,7 +172,7 @@ def latest_clestons_state(pr: dict[str, object]) -> str:
         if not isinstance(review, dict):
             continue
         author = review.get("author") or {}
-        if isinstance(author, dict) and author.get("login") == "clestons":
+        if isinstance(author, dict) and author.get("login") == review_user:
             state = review.get("state")
             return str(state or "")
     return ""
@@ -262,17 +264,21 @@ def upsert_pr(conn: sqlite3.Connection, pr: dict[str, object]) -> tuple[str, sql
 def build_prompt(row: sqlite3.Row) -> str:
     return textwrap.dedent(
         f"""
-        Use $rapid-mlx-review to review {row['repo']}#{row['pr_number']} in PR-Daemon autonomous watch mode.
+        Use $pk-review to review {row['repo']}#{row['pr_number']} in PR-Daemon autonomous watch mode.
+
+        3-tier PK review process:
+        1. You (DeepSeek via Claude Code) are the primary reviewer. Read the diff and relevant files independently first.
+        2. Optionally run skills/pk-review/scripts/local_review.py for an additional breadth pass.
+        3. Invoke Codex as the PK challenger: codex exec with the finding list.
+        4. Own the final verdict and post the GitHub review as clestons.
 
         Requirements:
-        - Use the local repository if available; never clone to /tmp unless no configured local checkout exists.
-        - Use the configured first-pass reviewer for broad pass, prior-finding verification, adversarial cases, and comment draft. Prefer DeepSeek via the repo .env when configured; otherwise use Rapid-MLX. If the primary provider fails, fall back to Rapid-MLX.
-        - Codex must independently verify findings with code, diff, and commands.
+        - Use the local repository if available (see config/repo-roots.json); never clone to /tmp unless no local checkout exists.
         - Every review must end with a clear conclusion: APPROVE, REQUEST_CHANGES, or COMMENT.
-        - Post the corresponding GitHub review/comment as clestons.
+        - Post the corresponding GitHub review/comment as clestons using scripts/post_pr_review.sh.
         - Never merge the PR, even after approval. Leave merge decisions to the PR author/maintainer.
-        - Update PR-Daemon SQLite/Markdown records, including model score and improvement-item assessment.
-        - Continue to treat local-model output as hypotheses, not final authority.
+        - Update PR-Daemon SQLite/Markdown records: reviews/, model_eval_db.py record-run.
+        - Do NOT modify business repo source, config, tests, or lock files.
 
         PR metadata:
         - title: {row['title']}
@@ -387,7 +393,59 @@ def write_watcher_state(state_path: Path, **payload: object) -> None:
     state_path.write_text(json.dumps(current, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
 
 
-def launch_codex(row: sqlite3.Row, prompt_path: Path, dry_run: bool) -> int:
+def read_workspace_roots(config_path: Path = Path("config/workspace-roots.txt")) -> list[str]:
+    if not config_path.exists():
+        return []
+    roots = []
+    for line in config_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            roots.append(stripped)
+    return roots
+
+
+def _add_dir_flags(roots: list[str]) -> list[str]:
+    flags: list[str] = []
+    for root in roots:
+        flags += ["--add-dir", root]
+    return flags
+
+
+def _build_claude_cmd(prompt_text: str, roots: list[str]) -> list[str]:
+    reviewer_script = str(Path.cwd() / "run-dpsk-claude.sh")
+    model = os.environ.get("PR_DAEMON_REVIEWER_MODEL", "opus")
+    max_turns = os.environ.get("PR_DAEMON_REVIEWER_MAX_TURNS", "40")
+    skill_file = str(Path.cwd() / "skills/pk-review/SKILL.md")
+    cmd = [
+        "bash",
+        reviewer_script,
+        "-p",
+        prompt_text,
+        "--model",
+        model,
+        "--permission-mode",
+        "dontAsk",
+        "--allowedTools",
+        "Read",
+        "Write",
+        "Edit",
+        "Bash(git *)",
+        "Bash(gh *)",
+        "Bash(python3 *)",
+        "Bash(codex *)",
+        "Bash(bash scripts/post_pr_review.sh*)",
+        "Bash(bash scripts/rapid_mlx_daemon.sh*)",
+        "Bash(sqlite3 *)",
+        "--append-system-prompt-file",
+        skill_file,
+        "--max-turns",
+        max_turns,
+    ]
+    cmd += _add_dir_flags(roots)
+    return cmd
+
+
+def _build_codex_cmd(prompt_text: str, roots: list[str]) -> list[str]:
     cmd = [
         "codex",
         "exec",
@@ -397,17 +455,46 @@ def launch_codex(row: sqlite3.Row, prompt_path: Path, dry_run: bool) -> int:
         "sandbox_workspace_write.network_access=true",
         "--cd",
         str(Path.cwd()),
-        "--add-dir",
-        "/Users/jason/Dev/aastar",
-        "--add-dir",
-        "/Users/jason/Dev/auraai",
-        "--add-dir",
-        "/Users/jason/Dev/mycelium",
-        prompt_path.read_text(encoding="utf-8"),
     ]
-    print("LAUNCH", row["repo"], f"#{row['pr_number']}", shlex.join(cmd[:12]), "...")
+    cmd += _add_dir_flags(roots)
+    cmd.append(prompt_text)
+    return cmd
+
+
+def launch_reviewer(row: sqlite3.Row, prompt_path: Path, dry_run: bool) -> int:
+    prompt_text = prompt_path.read_text(encoding="utf-8")
+    roots = read_workspace_roots()
+
+    primary_cli = os.environ.get("PR_DAEMON_REVIEWER_CLI", "claude")
+    fallback_cli = os.environ.get("PR_DAEMON_REVIEWER_FALLBACK", "codex")
+
+    # Determine which CLI to use based on binary availability
+    use_claude = primary_cli == "claude" and shutil.which("claude") is not None
+    use_claude = use_claude and Path("run-dpsk-claude.sh").exists()
+
+    if use_claude:
+        cmd = _build_claude_cmd(prompt_text, roots)
+        cli_label = "claude(deepseek)"
+    elif shutil.which(fallback_cli):
+        cmd = _build_codex_cmd(prompt_text, roots)
+        cli_label = fallback_cli
+    else:
+        # Last resort: codex with default roots
+        cmd = _build_codex_cmd(prompt_text, roots)
+        cli_label = "codex(default)"
+
+    print("LAUNCH", row["repo"], f"#{row['pr_number']}", f"[{cli_label}]", shlex.join(cmd[:6]), "...")
     if not dry_run:
         result = subprocess.run(cmd, check=False)
+        # On non-zero exit from primary, retry with Codex if different binary was used
+        if result.returncode != 0 and use_claude and shutil.which(fallback_cli):
+            print(
+                f"FALLBACK {row['repo']}#{row['pr_number']} {cli_label} exited {result.returncode};"
+                f" retrying with {fallback_cli}",
+                file=sys.stderr,
+            )
+            fallback_cmd = _build_codex_cmd(prompt_text, roots)
+            result = subprocess.run(fallback_cmd, check=False)
         return result.returncode
     return 0
 
@@ -494,13 +581,13 @@ def process_queue(conn: sqlite3.Connection, args: argparse.Namespace, current_re
 
     if args.auto_review:
         if args.dry_run:
-            launch_codex(row, path, True)
+            launch_reviewer(row, path, True)
         else:
             returncode = -1
             mark_reviewing(conn, row)
             write_current_review(current_review, row, path)
             try:
-                returncode = launch_codex(row, path, False)
+                returncode = launch_reviewer(row, path, False)
             except Exception as exc:
                 mark_prompt(conn, row, path)
                 conn.execute(
@@ -522,7 +609,7 @@ def process_queue(conn: sqlite3.Connection, args: argparse.Namespace, current_re
                     INSERT INTO pr_watch_events (repo, pr_number, head_oid, event_type, details)
                     VALUES (?, ?, ?, 'launch_error', ?)
                     """,
-                    (row["repo"], row["pr_number"], row["head_oid"], f"codex exit code {returncode}"),
+                    (row["repo"], row["pr_number"], row["head_oid"], f"reviewer exit code {returncode}"),
                 )
     return 1
 
