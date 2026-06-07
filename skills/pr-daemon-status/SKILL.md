@@ -60,6 +60,15 @@ FROM model_review_runs
 ORDER BY created_at DESC LIMIT 10;"
 ```
 
+## Step 2.5 — Token Cost (cumulative)
+
+```bash
+python3 PR_DAEMON_ROOT/scripts/token_cost.py --status
+```
+
+Pricing: DeepSeek V4 Pro · Input $0.435/M · Cache-hit $0.003625/M · Output $0.87/M
+(Source: https://api-docs.deepseek.com/quick_start/pricing)
+
 ## Step 3 — Format and Print
 
 Output a dashboard in this format:
@@ -69,17 +78,21 @@ Output a dashboard in this format:
   PR Daemon Status  •  <current time>
 ═══════════════════════════════════════
 
+📊 PR status: open N, reviewed M [changes: X, approve: Y, else: Z]
+
 Queue
-  Total discovered : N
   🔄 Reviewing now : N  (repo/PR#)
   ⏳ Pending       : N  (needs_review + prompt_ready)
-  👁  Seen only     : N  (not yet queued for review)
+  👁  Seen only     : N  (not yet queued)
 
-Completed Reviews
-  Total posted     : N
-  ❌ REQUEST_CHANGES : N  (avg score: X.X)
-  ✅ APPROVE          : N  (avg score: X.X)
-  💬 COMMENT          : N  (avg score: X.X)
+Verdicts
+  ❌ REQUEST_CHANGES : N  (avg X.X)
+  ✅ APPROVE          : N  (avg X.X)
+  💬 COMMENT          : N  (avg X.X)
+
+💰 DeepSeek V4 Pro · Estimate
+  Cumulative       : N,N tokens ≈ $X.XXXX
+  Per-PR avg       : ~N tokens ≈ $X.XX
 
 Recent
   <repo>#<pr>  <verdict>  score=X.X  <time>

@@ -72,6 +72,8 @@ Before posting ANY review, you MUST answer YES to ALL of these:
 [ ] Did I post via post_pr_review.sh?                       (not gh pr review or gh pr comment directly)
 [ ] Did I record results via model_eval_db.py record-run?   (Mandatory — even for trivial APPROVEs)
 [ ] Did I update pr_watch_targets status in SQLite?         (Mandatory — sets last_reviewed_head_oid)
+[ ] Did I report the per-PR status counter?                 (open N, reviewed M [changes: X, approve: Y, else: Z])
+[ ] Did I estimate and log the token cost for this PR?       (via python3 scripts/token_cost.py --add IN OUT)
 ```
 
 If any box is unchecked → go back to that step and complete it. **No "bulk done" shortcuts.**
@@ -86,9 +88,12 @@ Review account: $PR_DAEMON_REVIEW_USER. PK challenger: codex.
 Will not merge any PR. Beginning scan...
 ```
 
-## Step 1 — Discover Open PRs
+## Step 1 — Discover Open PRs (3 Orgs Only)
 
-Always use explicit `--author` (never `@me` — active account may be the review account):
+**ONLY review PRs in these 3 orgs: `AAStarCommunity`, `AuraAIHQ`, `MushroomDAO`.**
+Never review PRs from `jhfnetboy` (personal) or any other org — skip them immediately.
+
+Use `prbot all` to discover the queue (it reads `~/.config/prbot/repos.conf`):
 
 ```bash
 gh search prs --author "$PR_DAEMON_MAIN_USER" --state open \
@@ -238,6 +243,65 @@ python3 PR_DAEMON_ROOT/scripts/model_eval_db.py record-run \
 # Update watcher state
 sqlite3 "$PR_DAEMON_STATE_DIR/pr-watch.sqlite" \
   "UPDATE pr_watch_targets SET last_reviewed_head_oid='HEADOID', status='changes_requested', last_reviewed_at=CURRENT_TIMESTAMP WHERE repo='OWNER/REPO' AND pr_number=N;"
+```
+
+## Step 6.5 — Per-PR Status Counter + Token Cost (MANDATORY after every PR)
+
+After recording results for each PR, print BOTH:
+
+### 6.5a — PR Status Counter
+
+```bash
+STATE_DB="PR_DAEMON_ROOT/.state/pr-daemon/pr-watch.sqlite"
+
+# Count total PRs in 3 orgs
+TOTAL=$(sqlite3 "$STATE_DB" "
+  SELECT COUNT(*) FROM pr_watch_targets
+  WHERE repo LIKE 'AAStarCommunity/%' OR repo LIKE 'AuraAIHQ/%' OR repo LIKE 'MushroomDAO/%';")
+
+# Count reviewed by verdict
+REVIEWED=$(sqlite3 "$STATE_DB" "
+  SELECT COUNT(*) FROM pr_watch_targets
+  WHERE status IN ('approved','changes_requested','comment')
+  AND (repo LIKE 'AAStarCommunity/%' OR repo LIKE 'AuraAIHQ/%' OR repo LIKE 'MushroomDAO/%');")
+
+CHANGES=$(sqlite3 "$STATE_DB" "
+  SELECT COUNT(*) FROM pr_watch_targets
+  WHERE status='changes_requested'
+  AND (repo LIKE 'AAStarCommunity/%' OR repo LIKE 'AuraAIHQ/%' OR repo LIKE 'MushroomDAO/%');")
+
+APPROVED=$(sqlite3 "$STATE_DB" "
+  SELECT COUNT(*) FROM pr_watch_targets
+  WHERE status='approved'
+  AND (repo LIKE 'AAStarCommunity/%' OR repo LIKE 'AuraAIHQ/%' OR repo LIKE 'MushroomDAO/%');")
+
+ELSE_COUNT=$((REVIEWED - CHANGES - APPROVED))
+echo "📊 PR status: open $TOTAL, reviewed $REVIEWED [request changes: $CHANGES, approve: $APPROVED, else: $ELSE_COUNT]"
+```
+
+### 6.5b — Token Cost (local tokenizer, 0 API cost)
+
+Estimate this PR's token usage and add it to cumulative tracking:
+
+```bash
+# Input tokens: estimate from the diff + conversation context for this PR
+# Output tokens: estimate from the review + PK challenge response
+# Rough estimate: 10K-50K input + 2K-10K output per trivial PR
+#                 50K-200K input + 10K-50K output per complex PR
+
+python3 PR_DAEMON_ROOT/scripts/token_cost.py --add INPUT_TOKENS OUTPUT_TOKENS
+
+# Print cumulative
+python3 PR_DAEMON_ROOT/scripts/token_cost.py --status
+```
+
+**Pricing reference (DeepSeek V4 Pro):** Input $0.435/M · Cache-hit $0.003625/M · Output $0.87/M
+
+**Output format after each PR:**
+```
+📊 MushroomDAO/Sin90#2 COMMENT | PK: 1r (1 challenged, 1 confirmed, 1 added)
+📊 PR status: open 54, reviewed 2 [request changes: 0, approve: 0, else: 2]
+💰 Estimated this PR: ~45K tokens ≈ $0.02 | Cumulative: 100K tokens ≈ $0.05
 ```
 
 ## Step 7 — Loop
