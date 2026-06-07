@@ -7,3 +7,4 @@ __pycache__/
 .state/
 *.sqlite-shm
 *.sqlite-wal
+deepseek_v3_tokenizer/*
