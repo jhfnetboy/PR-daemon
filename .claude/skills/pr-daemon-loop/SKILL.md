@@ -342,6 +342,42 @@ When all queued PRs are done:
 
 Continue until the user explicitly stops with Ctrl+C or says "stop the daemon".
 
+## Mandatory 15-Minute Status Report
+
+Every 15 minutes during the loop, pause and print a status report in this EXACT format:
+
+```
+═══════════════════════════════════════════════════════════
+  PR Daemon Status  •  <current time>
+═══════════════════════════════════════════════════════════
+
+📊 PR status: open N, reviewed M [changes: X, approve: Y, else: Z]
+
+This Session (本轮 loop)
+  Round 1 — <category> (N PRs)
+    ✅ repo#N  verdict  score=XX
+    ...
+
+  Round 2 — <category> (N PRs)
+    ...
+
+  ⏳ 待 review (N):
+    • repo#N  (description)
+
+💰 DeepSeek V4 Pro · Cumulative
+  Total: ~N tokens ≈ $X.XX
+  Per-PR avg: ~N tokens ≈ $X.XX
+
+🛡️ PK Stats
+  N/N PRs PK'ed (100%)
+  Double review: N PRs
+  PK MISSED findings: N
+═══════════════════════════════════════════════════════════
+```
+
+The first report prints after 15 minutes of loop runtime. Repeat every 15 minutes thereafter.
+Also print this report whenever the user asks for status or invokes `$pr-daemon-status`.
+
 ## Hard Rules
 
 - **NEVER MERGE** any PR — not even after APPROVE. `gh pr merge` is forbidden. Merging belongs to the PR author/maintainer only.

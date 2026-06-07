@@ -259,9 +259,15 @@ Use $pr-daemon-loop to start reviewing all my open PRs
 
 ---
 
-### 实时状态查看
+### 实时状态汇报
 
-随时输入 `$pr-daemon-status` 查看进度看板：
+Loop 运行期间，**每 15 分钟自动打印一次**标准格式状态报告：
+
+- `📊` 队列状态 (open / reviewed / changes / approve / else)
+- `💰` DeepSeek V4 Pro 费用累计 (tokens → USD)
+- `🛡️` PK 统计数据 (覆盖率、双轮 review、MISSED findings)
+
+随时输入 `$pr-daemon-status` 也可手动查看。：
 
 ```
 ════════════════════════════════════════
