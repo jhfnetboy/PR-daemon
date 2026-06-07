@@ -128,12 +128,12 @@ Merge any new findings from the breadth pass into your list.
 
 ## Step 4 — PK Challenge Round (Codex as Adversarial Challenger) — MANDATORY
 
-**Use the Agent tool with `subagent_type: "codex:rescue"` — NOT `codex exec` CLI.**  
+**Use the Agent tool with `subagent_type: "codex:codex-rescue"` — NOT `codex exec` CLI.**  
 `codex exec` spawns a fresh sandbox with 30–90s cold-start per call. The Agent tool uses the shared runtime and returns in seconds.
 
 ```
 Agent(
-  subagent_type = "codex:rescue",
+  subagent_type = "codex:codex-rescue",
   prompt = """
 PK CHALLENGE: You are the adversarial reviewer for OWNER/REPO#PR_NUMBER.
 

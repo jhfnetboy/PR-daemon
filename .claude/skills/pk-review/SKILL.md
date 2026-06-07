@@ -46,13 +46,13 @@ Read diff and changed file context. Focus on: correctness bugs, security, concur
 
 **This step is required for every review. Do not skip even if you are confident in the findings.**
 
-**Use the Agent tool with `subagent_type: "codex:rescue"` — do NOT use `codex exec` CLI (it spawns a fresh sandbox and is 30–90s slower).**
+**Use the Agent tool with `subagent_type: "codex:codex-rescue"` — do NOT use `codex exec` CLI (it spawns a fresh sandbox and is 30–90s slower).**
 
 Invoke the Agent tool like this (pseudocode — use it as the Agent tool call, not Bash):
 
 ```
 Agent(
-  subagent_type = "codex:rescue",
+  subagent_type = "codex:codex-rescue",
   prompt = """
 PK CHALLENGE for OWNER/REPO#N:
 

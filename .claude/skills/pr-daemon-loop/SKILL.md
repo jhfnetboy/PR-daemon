@@ -128,13 +128,13 @@ python3 PR_DAEMON_ROOT/skills/pk-review/scripts/local_review.py \
 
 **This step is required for every single PR review. Do not skip even if confident. No review may be posted without a completed PK challenge round.**
 
-**Use the Agent tool with `subagent_type: "codex:rescue"` — NOT `codex exec` CLI. The CLI spawns a fresh sandbox with 30–90s cold-start overhead; the Agent tool uses the shared runtime and is much faster.**
+**Use the Agent tool with `subagent_type: "codex:codex-rescue"` — NOT `codex exec` CLI. The CLI spawns a fresh sandbox with 30–90s cold-start overhead; the Agent tool uses the shared runtime and is much faster.**
 
 Invoke the Agent tool (not Bash) with this prompt:
 
 ```
 Agent(
-  subagent_type = "codex:rescue",
+  subagent_type = "codex:codex-rescue",
   prompt = """
 PK CHALLENGE for OWNER/REPO#N:
 
