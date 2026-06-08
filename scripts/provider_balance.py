@@ -25,6 +25,22 @@ from urllib.error import URLError, HTTPError
 ROOT = Path(__file__).resolve().parent.parent
 STATE_FILE = ROOT / ".state" / "pr-daemon" / "provider_balance.json"
 
+# ── Proxy ── load from .env (PR_DAEMON_HTTPS_PROXY or PR_DAEMON_ALL_PROXY)
+_PROXY_URL = os.environ.get("PR_DAEMON_HTTPS_PROXY") or os.environ.get("PR_DAEMON_ALL_PROXY") or os.environ.get("HTTPS_PROXY") or ""
+if not _PROXY_URL:
+    env_file = ROOT / ".env"
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("PR_DAEMON_HTTPS_PROXY=") or line.startswith("PR_DAEMON_ALL_PROXY="):
+                _PROXY_URL = line.split("=", 1)[1].strip().strip('"').strip("'")
+                if _PROXY_URL: break
+_PROXY_HANDLER = None
+if _PROXY_URL:
+    from urllib.request import ProxyHandler, build_opener, install_opener
+    _PROXY_HANDLER = ProxyHandler({"https": _PROXY_URL, "http": _PROXY_URL.replace("https://", "http://")})
+    install_opener(build_opener(_PROXY_HANDLER))
+
 # --- SSL context (covers macOS system CA) ------------------------------------
 try:
     import certifi
@@ -121,7 +137,8 @@ def fetch_deepseek():
     status, obj = http_get("https://api.deepseek.com/user/balance",
                            headers={"Authorization": f"Bearer {key}"})
     if status != 200 or not isinstance(obj, dict):
-        return {"error": f"http {status}"}
+        err = obj.get("_transport_error", f"http {status}") if isinstance(obj, dict) else f"http {status}"
+        return {"error": err}
 
     info_list = obj.get("balance_infos", [])
     cny = next((b for b in info_list if b.get("currency") == "CNY"), {})
@@ -147,7 +164,9 @@ def fetch_codex():
     status, obj = http_get("https://chatgpt.com/backend-api/wham/usage",
                            headers={"Authorization": f"Bearer {token}"})
     if status == 401: return {"error": "codex auth expired"}
-    if status != 200 or not isinstance(obj, dict): return {"error": f"http {status}"}
+    if status != 200 or not isinstance(obj, dict):
+        err = obj.get("_transport_error", f"http {status}") if isinstance(obj, dict) else f"http {status}"
+        return {"error": err}
 
     rl = obj.get("rate_limit") or {}
     def w(key):
