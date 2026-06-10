@@ -1,0 +1,3 @@
+[submodule "vendor/pr-agent"]
+	path = vendor/pr-agent
+	url = https://github.com/The-PR-Agent/pr-agent.git

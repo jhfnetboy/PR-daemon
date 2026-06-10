@@ -1,0 +1,86 @@
+# review_ignore.txt — files to skip / down-weight during PR review
+# Distilled from pr-agent's language_extensions.toml [bad_extensions].
+# Format: one glob/extension per line. '#' comments. Used by compress_diff.py
+# and the review loop to avoid wasting tokens on non-reviewable content.
+
+# ── Binary / non-text (never review) ──────────────────────────────
+*.app
+*.bin
+*.bmp
+*.bz2
+*.class
+*.dat
+*.db
+*.dll
+*.dylib
+*.egg
+*.eot
+*.exe
+*.gif
+*.glif
+*.gz
+*.ico
+*.jar
+*.jpeg
+*.jpg
+*.lo
+*.log
+*.mp3
+*.mp4
+*.nar
+*.o
+*.ogg
+*.otf
+*.p
+*.pdf
+*.png
+*.pickle
+*.pkl
+*.pyc
+*.pyd
+*.pyo
+*.so
+*.svg
+*.tar
+*.tgz
+*.tsv
+*.ttf
+*.war
+*.webm
+*.woff
+*.woff2
+*.xz
+*.zip
+*.zst
+*.snap
+*.lockb
+
+# ── Lock files (machine-generated, review the manifest not the lock) ─
+*.lock
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+poetry.lock
+Cargo.lock
+Gemfile.lock
+composer.lock
+foundry.lock
+
+# ── Generated / vendored (skip) ───────────────────────────────────
+*.min.js
+*.min.css
+**/node_modules/**
+**/dist/**
+**/build/**
+**/.next/**
+**/out/**
+**/vendor/**
+**/__pycache__/**
+**/*.generated.*
+**/generated/**
+
+# ── Down-weight (review lightly — docs/data, not logic) ────────────
+# These ARE reviewed but count toward the "2-round trivial" signal:
+# *.md
+# *.txt
+# *.csv
