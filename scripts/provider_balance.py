@@ -357,6 +357,55 @@ def collect():
 
 # --- Main --------------------------------------------------------------------
 
+def _print_compact(data, prev_snap):
+    """Dense 3-line summary — all info, no loss."""
+    ds = data.get("deepseek", {})
+    cx = data.get("codex", {})
+    cl = data.get("claude", {})
+
+    # DeepSeek line
+    if "error" in ds:
+        print(f"DS ⚠ {ds['error']}")
+    else:
+        parts = [f"DS 💰 CNY {ds.get('cny_left','?')} left"]
+        if prev_snap:
+            pds = prev_snap.get("deepseek", {})
+            if "error" not in pds:
+                pv = float(pds.get("cny_left", 0))
+                cv = float(ds.get("cny_left", 0))
+                if pv > cv:
+                    spent = round(pv - cv, 4)
+                    parts.append(f"(spent {spent} CNY ≈ ${round(spent*0.14,6)} since last check)")
+        print("  ".join(parts))
+
+    # Codex line
+    if "error" in cx:
+        print(f"CX ⚠ {cx['error']}")
+    else:
+        plan = f"[{cx.get('plan','?')}]" if cx.get("plan") else ""
+        parts = [f"CX {plan}"]
+        for key, label in [("five_hour", "5h"), ("weekly", "7d")]:
+            w = cx.get(key)
+            if w:
+                pct = w["pct"]
+                mins = max(0, int((w["reset_at"] - time.time()) / 60)) if w.get("reset_at") else 0
+                parts.append(f"{label}: {pct}% ({mins//60}h{mins%60:02d}m reset)")
+        print("  ".join(parts))
+
+    # Claude line
+    if "error" in cl:
+        print(f"CL ⚠ {cl['error']}")
+    else:
+        plan = f"[{cl.get('plan','?')}]" if cl.get("plan") else ""
+        parts = [f"CL {plan}"]
+        for key, label in [("five_hour", "5h"), ("weekly", "7d")]:
+            w = cl.get(key)
+            if w:
+                pct = w["pct"]
+                mins = max(0, int((w["reset_at"] - time.time()) / 60)) if w.get("reset_at") else 0
+                parts.append(f"{label}: {pct}% ({mins//60}h{mins%60:02d}m reset)")
+        print("  ".join(parts))
+
 def main():
     args = sys.argv[1:]
     watch_mode = "--watch" in args
@@ -381,31 +430,7 @@ def main():
         if json_mode:
             print(json.dumps(data, indent=2, ensure_ascii=False))
         elif compact:
-            for name, label, key in [
-                ("deepseek", "DS", "cny_left"),
-                ("codex", "CX", "five_hour"),
-                ("claude", "CL", "five_hour"),
-            ]:
-                p = data[name]
-                if "error" in p:
-                    print(f"{label} ⚠ {p['error']}")
-                elif name == "deepseek":
-                    total = p.get(key, "?")
-                    # delta if prev available
-                    extra = ""
-                    if prev_snap and prev_snap.get(name) and "error" not in prev_snap[name]:
-                        pv = float(prev_snap[name].get(key, 0))
-                        cv = float(total)
-                        if pv > cv:
-                            spent = round(pv - cv, 4)
-                            extra = f"  spent {spent} CNY ≈ ${round(spent*0.14,4)}"
-                    print(f"{label} 💰 CNY {total} left{extra}")
-                else:
-                    w = p.get("five_hour")
-                    if w:
-                        print(f"{label} {window_pct_bar(w)}")
-                    else:
-                        print(f"{label} —")
+            _print_compact(data, prev_snap)
         else:
             print(render_all(data["deepseek"], data["codex"], data["claude"], prev_snap))
 
