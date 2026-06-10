@@ -101,27 +101,59 @@ def get_current_head(repo, pr_number):
     return None
 
 
+def gh_list_repo_prs(repo, include_all_authors=False):
+    """List open PRs in one specific repo. Returns list of dicts shaped like gh search."""
+    cmd = ["gh", "pr", "list", "--repo", repo, "--state", "open",
+           "--json", "number,title,url,updatedAt,isDraft,author", "--limit", "100"]
+    for _ in range(3):
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            if out.returncode == 0:
+                txt = out.stdout
+                start, end = txt.find("["), txt.rfind("]")
+                if start >= 0 and end > start:
+                    raw = json.loads(txt[start:end + 1])
+                    # reshape to match gh search prs structure
+                    return [{
+                        "number": p["number"], "title": p["title"], "url": p["url"],
+                        "updatedAt": p["updatedAt"], "isDraft": p["isDraft"],
+                        "author": p.get("author", {}),
+                        "repository": {"nameWithOwner": repo},
+                    } for p in raw]
+        except (subprocess.TimeoutExpired, json.JSONDecodeError):
+            pass
+    return []
+
+
 def main():
     args = sys.argv[1:]
     max_prs = 100
     since_secs = None
+    target_repo = None
     if "--max" in args:
         max_prs = int(args[args.index("--max") + 1])
     if "--since" in args:
         since_secs = int(args[args.index("--since") + 1])
+    if "--repo" in args:
+        target_repo = args[args.index("--repo") + 1]
 
     author = load_main_user()
-    prs = gh_search_prs(author)
 
-    # filter to the 3 orgs, skip drafts
-    in_scope = []
-    for pr in prs:
-        owner = pr["repository"]["nameWithOwner"].split("/")[0]
-        if owner not in ORGS:
-            continue
-        if pr.get("isDraft"):
-            continue
-        in_scope.append(pr)
+    # Single-repo mode: list ALL open PRs in one repo (any author).
+    # Org-scan mode: list PRs by the main author across the 3 orgs.
+    if target_repo:
+        prs = gh_list_repo_prs(target_repo)
+        in_scope = [pr for pr in prs if not pr.get("isDraft")]
+    else:
+        prs = gh_search_prs(author)
+        in_scope = []
+        for pr in prs:
+            owner = pr["repository"]["nameWithOwner"].split("/")[0]
+            if owner not in ORGS:
+                continue
+            if pr.get("isDraft"):
+                continue
+            in_scope.append(pr)
 
     # incremental: filter by updatedAt if --since given
     if since_secs is not None:

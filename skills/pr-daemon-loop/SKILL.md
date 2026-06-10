@@ -50,12 +50,27 @@ poll_prs.py → for each PR:
   ▼   score DeepSeek, record triage, post, next PR
 ```
 
+## Token discipline (read first)
+
+To save tokens: **DeepSeek does the heavy lifting, Claude only does hard judgment.**
+- Read/compress the diff **ONCE**. Pass the SAME compressed diff forward to every round.
+- Subagents (Codex R3, Opus verdict) get the diff + prior findings **inline in the prompt** —
+  never tell them to re-fetch `gh pr diff`.
+- Use the concise templates in `config/review_templates.md`. No preamble, no postamble, no praise.
+- Each round outputs **deltas only** (confirm/reject/add), not a full re-derivation.
+
 ## Step 1 — Discover PRs (incremental)
 
+**Org-scan mode** (all 3 orgs):
 ```bash
 python3 PR_DAEMON_ROOT/scripts/poll_prs.py --max 5
 ```
-Returns new / head-changed PRs in the 3 orgs, deduped against `pr-watch.sqlite`. Skips drafts.
+**Single-repo mode** (one specific repo, all its open PRs):
+```bash
+python3 PR_DAEMON_ROOT/scripts/poll_prs.py --repo OWNER/REPO --max 10
+```
+Returns new / head-changed PRs, deduped against `pr-watch.sqlite`. Skips drafts.
+The user may pass a repo via `/pr-daemon-loop OWNER/REPO` or extra instructions — honor them.
 
 ## Step 2 — Get & compress the diff
 
@@ -65,20 +80,23 @@ gh pr diff N --repo OWNER/REPO > /tmp/pr-N.diff
 python3 PR_DAEMON_ROOT/scripts/compress_diff.py --file /tmp/pr-N.diff --budget 80000 --stats > /tmp/pr-N-compressed.diff
 ```
 
-## Step 3 — R1: DeepSeek initial review + triage proposal
+## Step 3 — R1: DeepSeek does the heavy lifting
 
-Call DeepSeek (cheap) to do the grunt work: read the compressed diff, produce a first-pass
-review AND propose a triage class. Use the breadth-pass script:
+DeepSeek (~$0.001/PR) produces ALL the mechanical work in one call: per-file summary,
+candidate findings, triage class, AND a draft comment skeleton. Claude works FROM this,
+not from scratch. Call DeepSeek directly with the R1 template (`config/review_templates.md`):
 
 ```bash
-python3 PR_DAEMON_ROOT/skills/pk-review/scripts/local_review.py \
-  --repo ~/Dev/ORG/REPO --diff-file /tmp/pr-N-compressed.diff \
-  --eval-db PR_DAEMON_ROOT/reviews/model-evals/model-evals.sqlite \
-  --owner OWNER --repo-name REPO --pr-number N \
-  --output /tmp/pr-N-deepseek.md
+# DeepSeek R1 — pass the compressed diff, get FILES/FINDINGS/TRIAGE/SKELETON
+python3 PR_DAEMON_ROOT/scripts/deepseek_review.py \
+  --diff-file /tmp/pr-N-compressed.diff \
+  --repo OWNER/REPO --pr N --output /tmp/pr-N-r1.md
 ```
+(If `deepseek_review.py` is absent, fall back to `skills/pk-review/scripts/local_review.py`.)
 
-DeepSeek's output = initial findings + a proposed class (trivial / significant).
+DeepSeek's output is the working base: `FILES`, `FINDINGS` (with severity+fix), `TRIAGE`
+(trivial/significant), `SKELETON` (4-line draft comment). **Do not re-read the diff in full
+afterward** — validate findings and spot-check only the hunks tied to high-sev/security items.
 
 ## Step 4 — Triage confirm: 2-round or 4-round?
 
@@ -118,33 +136,37 @@ No Codex, no Opus. Go to Step 6.
 
 ## Step 5b — 4-round path (high risk)
 
-**R2 — Sonnet challenge:** independently review the diff. Challenge DeepSeek's R1 findings —
-confirm the real ones, reject the false positives, add what it missed. Form your finding list.
+**R2 — Sonnet challenge (deltas only):** work FROM DeepSeek's FINDINGS, don't re-derive.
+Spot-check only high-sev/security hunks. Output compactly: `CONFIRM <ids>` / `REJECT <id — why>` /
+`ADD <[Sev] file:line — issue | fix>`. (Template: R2 in `config/review_templates.md`.)
 
-**R3 — Codex PK (MANDATORY for 4-round):** use the Agent tool with `codex:codex-rescue`:
+**R3 — Codex PK (MANDATORY for 4-round):** pass the diff + R2 finding list **inline** so Codex
+does NOT re-fetch. Use `codex:codex-rescue`:
 ```
 Agent(subagent_type="codex:codex-rescue", prompt="""
-PK CHALLENGE for OWNER/REPO#N:
-Read the diff: gh pr diff N --repo OWNER/REPO --patch
-Adversarially challenge each finding. For each return EXACTLY ONE of:
-- [CHALLENGE] <finding> — counter-evidence / false-positive reason
-- [CONFIRM] <finding> — independent supporting evidence
-- [MISSED] <new finding> — real issue not in the list
-Findings: <YOUR R2 LIST>
-Do NOT post to GitHub. Return ONLY the structured critique.
+PK CHALLENGE OWNER/REPO#N. Diff and findings are below — do NOT run gh pr diff.
+Per finding return ONE: [CHALLENGE|CONFIRM|MISSED] id — reason <=20 words.
+DIFF:
+<paste compressed diff>
+FINDINGS (post-R2):
+<compact list>
+Return ONLY the structured critique. Do not post to GitHub.
 """)
 ```
-If Codex quota is exhausted → Sonnet runs one more self-challenge round as fallback. Note it in the review.
+If Codex quota is exhausted → it auto-falls-back to Tier-3; or Sonnet self-challenges once. Note which.
 
-**Final verdict — Opus subagent:** spawn an Opus subagent to make the call, respecting all 3 rounds:
+**Final verdict — Opus subagent (fixed template, no essay):** pass COMPACT round summaries, not
+full re-explanations. Demand the fixed template:
 ```
 Agent(subagent_type="general-purpose", model="opus", prompt="""
-You are the final authority on OWNER/REPO#N. Synthesize three review rounds and decide.
-R1 (DeepSeek): <...>   R2 (Sonnet): <...>   R3 (Codex): <...>
-Respect Codex's points one by one — do not dismiss a Codex finding without concrete counter-evidence.
-Output: verdict (APPROVE | REQUEST_CHANGES), the confirmed findings with evidence+fix,
-rejected findings with reasons, and improvement suggestions. REQUEST_CHANGES must include
-challenging, specific objections. APPROVE may still add enhancement suggestions.
+Final authority on OWNER/REPO#N. Decide from these compact rounds. Respect Codex point-by-point
+(no dismissal without concrete counter-evidence). Output ONLY this template, no prose:
+VERDICT: APPROVE | REQUEST_CHANGES
+BLOCKING: <[Sev] file:line — issue | fix>   (empty if APPROVE)
+CONFIRMED: <[Sev] file:line — issue | fix>
+REJECTED: <finding — reason>
+SUGGESTIONS: <=3 bullets, optional
+ROUNDS — R1(DeepSeek): <...>  R2(Sonnet): <...>  R3(Codex): <...>
 """)
 ```
 

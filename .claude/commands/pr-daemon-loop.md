@@ -1,18 +1,21 @@
 ---
-description: Start the 24/7 PR review loop (3-round PK + Opus verdict, 2/4-round triage)
+description: Start the PR review loop (3-round PK + Opus verdict, 2/4 triage). Optional args: a repo (OWNER/REPO) and/or extra instructions.
+argument-hint: "[OWNER/REPO] [extra instructions]"
 ---
 
-Start the PR-Daemon review loop by invoking the `pr-daemon-loop` skill.
+Start the PR-Daemon review loop by loading the `pr-daemon-loop` skill.
 
-Follow the skill's instructions exactly. Key points:
-- You (Claude Code on the Max subscription) are the orchestrator and final authority.
-- Run the main loop on the current session model (Sonnet recommended for cost).
-- For each PR: R1 DeepSeek initial review + triage proposal → confirm 2-round vs 4-round.
-- 2-round (low risk): DeepSeek → Sonnet verdict.
-- 4-round (high risk): DeepSeek → Sonnet challenge → Codex PK → Opus subagent verdict.
-- Final verdict must be APPROVE or REQUEST_CHANGES (never COMMENT limbo). Respect Codex feedback point-by-point.
-- Score DeepSeek's work each PR, record triage decision, never merge.
+User arguments: $ARGUMENTS
 
-See DESIGN.md for the full architecture.
+Interpret the arguments:
+- If an argument looks like `OWNER/REPO` → **single-repo mode**: review ALL open PRs in that
+  one repo. Discover with `python3 scripts/poll_prs.py --repo OWNER/REPO`.
+- If no repo is given → **org-scan mode**: review the 3 orgs (AAStarCommunity, AuraAIHQ, MushroomDAO)
+  via `python3 scripts/poll_prs.py`.
+- Any remaining text is extra instructions (e.g. "only security review", "max 3 PRs", "skip drafts")
+  — honor them on top of the skill's defaults.
 
-Begin now: load the `pr-daemon-loop` skill and start scanning.
+Then run the skill's pipeline per PR. Print the per-PR report after each
+(verdict, status counter, token cost) so the user sees intermediate progress.
+
+See DESIGN.md for the architecture. Begin now.
