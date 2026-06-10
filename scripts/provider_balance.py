@@ -29,6 +29,8 @@ STATE_FILE = ROOT / ".state" / "pr-daemon" / "provider_balance.json"
 _PROXY_URL = os.environ.get("PR_DAEMON_HTTPS_PROXY") or os.environ.get("PR_DAEMON_ALL_PROXY") or os.environ.get("HTTPS_PROXY") or ""
 if not _PROXY_URL:
     env_file = ROOT / ".env"
+    if not env_file.exists():
+        env_file = Path.home() / ".pr-daemon.env"
     if env_file.exists():
         for line in env_file.read_text().splitlines():
             line = line.strip()
@@ -85,9 +87,11 @@ def http_post(url, headers=None, body=None):
         return 0, {"_transport_error": str(e)}
 
 def load_env_key():
-    """Load DEEPSEEK_API_KEY from .env or environment."""
+    """Load DEEPSEEK_API_KEY from environment, then .env, then ~/.pr-daemon.env."""
     key = os.environ.get("DEEPSEEK_API_KEY", "")
-    if key:  return key.strip('"').strip("'")
+    if key and key.startswith("sk-"): return key.strip('"').strip("'")
+
+    # Check .env in the PR-Daemon root
     env_file = ROOT / ".env"
     if env_file.exists():
         for line in env_file.read_text().splitlines():
@@ -95,6 +99,16 @@ def load_env_key():
             if line.startswith("DEEPSEEK_API_KEY="):
                 val = line.split("=", 1)[1].strip().strip('"').strip("'")
                 if val and val.startswith("sk-"): return val
+
+    # Last resort: ~/.pr-daemon.env for standalone use
+    home_env = Path.home() / ".pr-daemon.env"
+    if home_env.exists():
+        for line in home_env.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("DEEPSEEK_API_KEY="):
+                val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                if val and val.startswith("sk-"): return val
+
     return ""
 
 def load_state():
