@@ -42,28 +42,65 @@ def load_main_user():
     return "jhfnetboy"
 
 
-def gh_search_org_prs():
-    """List ALL open PRs across the 3 orgs — any author, including bots. Retry-safe.
+GRAPHQL_QUERY = """
+query($q: String!, $cursor: String) {
+  search(query: $q, type: ISSUE, first: 100, after: $cursor) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      ... on PullRequest {
+        number title url updatedAt isDraft headRefOid
+        author { login }
+        repository { nameWithOwner }
+      }
+    }
+  }
+}
+"""
 
-    Goal is to clear every open PR, so we do NOT filter by author. dependabot,
-    fanhousanbu, jhfnetboy, etc. all get reviewed.
+
+def gh_search_org_prs():
+    """ALL open PRs across the 3 orgs — any author, incl bots — via ONE GraphQL call.
+
+    Returns dicts shaped like gh search, PLUS headRefOid (so sync needs no per-PR
+    head fetch). Paginates if >100. Goal: clear every PR, so no author filter.
     """
-    cmd = ["gh", "search", "prs", "--state", "open",
-           "--json", "number,title,repository,url,updatedAt,isDraft,author",
-           "--limit", "300"]
-    for org in ORGS:
-        cmd += ["--owner", org]
-    for _ in range(3):
-        try:
-            out = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
-            if out.returncode == 0:
-                txt = out.stdout
-                start, end = txt.find("["), txt.rfind("]")
-                if start >= 0 and end > start:
-                    return json.loads(txt[start:end + 1])
-        except (subprocess.TimeoutExpired, json.JSONDecodeError):
-            pass
-    return []
+    q = " ".join(f"org:{o}" for o in ORGS) + " is:pr is:open"
+    results = []
+    cursor = None
+    for _page in range(10):  # up to 1000 PRs
+        cmd = ["gh", "api", "graphql", "-f", f"query={GRAPHQL_QUERY}", "-f", f"q={q}"]
+        if cursor:
+            cmd += ["-f", f"cursor={cursor}"]
+        got = None
+        for _ in range(3):
+            try:
+                out = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+                if out.returncode == 0:
+                    txt = out.stdout
+                    s = txt.find("{")
+                    got = json.loads(txt[s:txt.rfind("}") + 1])
+                    break
+            except (subprocess.TimeoutExpired, json.JSONDecodeError):
+                pass
+        if not got:
+            break
+        search = got.get("data", {}).get("search", {})
+        for n in search.get("nodes", []):
+            if not n:
+                continue
+            results.append({
+                "number": n["number"], "title": n["title"], "url": n["url"],
+                "updatedAt": n["updatedAt"], "isDraft": n["isDraft"],
+                "headRefOid": n.get("headRefOid"),
+                "author": n.get("author") or {},
+                "repository": {"nameWithOwner": n["repository"]["nameWithOwner"]},
+            })
+        pi = search.get("pageInfo", {})
+        if pi.get("hasNextPage"):
+            cursor = pi.get("endCursor")
+        else:
+            break
+    return results
 
 
 def get_reviewed_head(repo, pr_number):
@@ -158,32 +195,25 @@ def sync_to_sqlite(prs):
             "SELECT status, last_reviewed_head_oid, last_reviewed_at FROM pr_watch_targets "
             "WHERE repo=? AND pr_number=?", (repo, num)).fetchone()
         is_draft = 1 if pr.get("isDraft") else 0
+        cur_head = pr.get("headRefOid")  # from GraphQL — no extra gh call needed
         if row is None:
-            # new PR: don't spend a gh call on head yet — filled at review time
             conn.execute(
-                "INSERT INTO pr_watch_targets (repo, pr_number, title, url, author, "
-                "state, is_draft, status, last_seen_at) VALUES (?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
-                (repo, num, pr["title"], pr["url"], author, "open", is_draft, "needs_review"))
+                "INSERT INTO pr_watch_targets (repo, pr_number, title, url, author, head_oid, "
+                "state, is_draft, status, last_seen_at) VALUES (?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
+                (repo, num, pr["title"], pr["url"], author, cur_head, "open", is_draft, "needs_review"))
             inserted += 1
         else:
             status, last_head, last_reviewed_at = row
             new_status = status
             if status in ("approved", "changes_requested", "comment"):
-                # Skip the gh head-fetch if the PR hasn't been touched since we reviewed it:
-                # if updatedAt <= last_reviewed_at, the head cannot have moved.
-                pr_updated = pr.get("updatedAt", "")
-                if last_reviewed_at and pr_updated and pr_updated <= last_reviewed_at:
-                    pass  # unchanged since review — no fetch, keep status
-                else:
-                    cur_head = get_current_head(repo, num)
-                    if cur_head and cur_head != last_head:
-                        new_status = "needs_review"   # head moved → re-review
+                if cur_head and cur_head != last_head:
+                    new_status = "needs_review"   # head moved → re-review
             elif status == "closed":
-                new_status = "needs_review"           # reopened
+                new_status = "needs_review"       # reopened
             conn.execute(
-                "UPDATE pr_watch_targets SET title=?, url=?, author=?, is_draft=?, "
+                "UPDATE pr_watch_targets SET title=?, url=?, author=?, head_oid=?, is_draft=?, "
                 "state='open', status=?, last_seen_at=CURRENT_TIMESTAMP WHERE repo=? AND pr_number=?",
-                (pr["title"], pr["url"], author, is_draft, new_status, repo, num))
+                (pr["title"], pr["url"], author, cur_head, is_draft, new_status, repo, num))
             updated += 1
 
     # mark PRs that are tracked but no longer open as closed
@@ -213,7 +243,7 @@ def build_queue(prs, max_prs, since_secs):
         if row:
             last_head, status = row
             if status in ("approved", "changes_requested", "comment"):
-                cur = get_current_head(repo, num)
+                cur = pr.get("headRefOid")  # inline from GraphQL — no extra gh call
                 if cur and cur == last_head:
                     continue
                 reason = "head-changed"
