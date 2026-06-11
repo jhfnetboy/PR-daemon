@@ -59,18 +59,25 @@ To save tokens: **DeepSeek does the heavy lifting, Claude only does hard judgmen
 - Use the concise templates in `config/review_templates.md`. No preamble, no postamble, no praise.
 - Each round outputs **deltas only** (confirm/reject/add), not a full re-derivation.
 
-## Step 1 — Discover PRs (incremental)
+## Step 1 — Sync + discover PRs
 
-**Org-scan mode** (all 3 orgs):
+**At the start of every loop cycle, run with `--sync`** to mirror ALL open PRs into SQLite
+(every author, including bots — the goal is to clear every PR). This keeps `pr-watch.sqlite`
+an accurate live snapshot: new→`needs_review`, head-moved→`needs_review`, gone→`closed`.
+
+**Org-scan mode** (all 3 orgs, ALL authors incl. dependabot):
 ```bash
-python3 PR_DAEMON_ROOT/scripts/poll_prs.py --max 5
+python3 PR_DAEMON_ROOT/scripts/poll_prs.py --sync --max 200
 ```
-**Single-repo mode** (one specific repo, all its open PRs):
+**Single-repo mode** (one repo, all its open PRs):
 ```bash
-python3 PR_DAEMON_ROOT/scripts/poll_prs.py --repo OWNER/REPO --max 10
+python3 PR_DAEMON_ROOT/scripts/poll_prs.py --repo OWNER/REPO --sync --max 50
 ```
-Returns new / head-changed PRs, deduped against `pr-watch.sqlite`. Skips drafts.
+Output: `total_open`, `sync` counts (inserted/updated/closed), and the review `queue`
+(new / head-changed only). The DB stores author + reviewer + status for every PR.
 The user may pass a repo via `/pr-daemon-loop OWNER/REPO` or extra instructions — honor them.
+
+After this, work the queue. To see the full picture any time: `$pr-daemon-status`.
 
 ## Step 2 — Get & compress the diff
 

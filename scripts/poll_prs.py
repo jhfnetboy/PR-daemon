@@ -42,26 +42,25 @@ def load_main_user():
     return "jhfnetboy"
 
 
-def gh_search_prs(author, since_iso=None):
-    """List open PRs by author. Returns list of dicts. Retry-safe."""
-    cmd = [
-        "gh", "search", "prs",
-        "--author", author,
-        "--state", "open",
-        "--json", "number,title,repository,url,updatedAt,isDraft",
-        "--limit", "100",
-    ]
-    for attempt in range(3):
+def gh_search_org_prs():
+    """List ALL open PRs across the 3 orgs — any author, including bots. Retry-safe.
+
+    Goal is to clear every open PR, so we do NOT filter by author. dependabot,
+    fanhousanbu, jhfnetboy, etc. all get reviewed.
+    """
+    cmd = ["gh", "search", "prs", "--state", "open",
+           "--json", "number,title,repository,url,updatedAt,isDraft,author",
+           "--limit", "300"]
+    for org in ORGS:
+        cmd += ["--owner", org]
+    for _ in range(3):
         try:
-            out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
             if out.returncode == 0:
-                # gh prints non-JSON request log lines to stdout sometimes; find the array
                 txt = out.stdout
-                start = txt.find("[")
-                end = txt.rfind("]")
+                start, end = txt.find("["), txt.rfind("]")
                 if start >= 0 and end > start:
                     return json.loads(txt[start:end + 1])
-            # else retry
         except (subprocess.TimeoutExpired, json.JSONDecodeError):
             pass
     return []
@@ -125,45 +124,86 @@ def gh_list_repo_prs(repo, include_all_authors=False):
     return []
 
 
-def main():
-    args = sys.argv[1:]
-    max_prs = 100
-    since_secs = None
-    target_repo = None
-    if "--max" in args:
-        max_prs = int(args[args.index("--max") + 1])
-    if "--since" in args:
-        since_secs = int(args[args.index("--since") + 1])
-    if "--repo" in args:
-        target_repo = args[args.index("--repo") + 1]
+def sync_to_sqlite(prs):
+    """Upsert every open PR into pr_watch_targets — the live mirror of all open PRs.
 
-    author = load_main_user()
+    Stores author + reviewer + status. Marks PRs no longer open as 'closed'.
+    - new PR                       → status='needs_review'
+    - already reviewed, head same  → keep status (approved/changes_requested)
+    - already reviewed, head moved  → status='needs_review' (re-review)
+    Returns (inserted, updated, closed) counts.
+    """
+    review_user = os.environ.get("PR_DAEMON_REVIEW_USER", "clestons")
+    conn = sqlite3.connect(STATE_DB)
+    conn.execute("CREATE TABLE IF NOT EXISTS pr_watch_targets ("
+                 "id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT, pr_number INTEGER, title TEXT, "
+                 "url TEXT, author TEXT, head_oid TEXT, state TEXT, review_decision TEXT, "
+                 "is_draft INTEGER DEFAULT 0, first_seen_at TEXT DEFAULT CURRENT_TIMESTAMP, "
+                 "last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP, last_reviewed_head_oid TEXT, "
+                 "last_reviewed_at TEXT, status TEXT DEFAULT 'seen', reviewer TEXT, "
+                 "UNIQUE(repo, pr_number))")
+    # ensure reviewer column exists (older DBs)
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(pr_watch_targets)").fetchall()]
+    if "reviewer" not in cols:
+        conn.execute("ALTER TABLE pr_watch_targets ADD COLUMN reviewer TEXT")
 
-    # Single-repo mode: list ALL open PRs in one repo (any author).
-    # Org-scan mode: list PRs by the main author across the 3 orgs.
-    if target_repo:
-        prs = gh_list_repo_prs(target_repo)
-        in_scope = [pr for pr in prs if not pr.get("isDraft")]
-    else:
-        prs = gh_search_prs(author)
-        in_scope = []
-        for pr in prs:
-            owner = pr["repository"]["nameWithOwner"].split("/")[0]
-            if owner not in ORGS:
-                continue
-            if pr.get("isDraft"):
-                continue
-            in_scope.append(pr)
+    seen_keys = set()
+    inserted = updated = 0
+    for pr in prs:
+        repo = pr["repository"]["nameWithOwner"]
+        num = pr["number"]
+        author = (pr.get("author") or {}).get("login", "?")
+        seen_keys.add((repo, num))
+        row = conn.execute(
+            "SELECT status, last_reviewed_head_oid, last_reviewed_at FROM pr_watch_targets "
+            "WHERE repo=? AND pr_number=?", (repo, num)).fetchone()
+        is_draft = 1 if pr.get("isDraft") else 0
+        if row is None:
+            # new PR: don't spend a gh call on head yet — filled at review time
+            conn.execute(
+                "INSERT INTO pr_watch_targets (repo, pr_number, title, url, author, "
+                "state, is_draft, status, last_seen_at) VALUES (?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
+                (repo, num, pr["title"], pr["url"], author, "open", is_draft, "needs_review"))
+            inserted += 1
+        else:
+            status, last_head, last_reviewed_at = row
+            new_status = status
+            if status in ("approved", "changes_requested", "comment"):
+                # Skip the gh head-fetch if the PR hasn't been touched since we reviewed it:
+                # if updatedAt <= last_reviewed_at, the head cannot have moved.
+                pr_updated = pr.get("updatedAt", "")
+                if last_reviewed_at and pr_updated and pr_updated <= last_reviewed_at:
+                    pass  # unchanged since review — no fetch, keep status
+                else:
+                    cur_head = get_current_head(repo, num)
+                    if cur_head and cur_head != last_head:
+                        new_status = "needs_review"   # head moved → re-review
+            elif status == "closed":
+                new_status = "needs_review"           # reopened
+            conn.execute(
+                "UPDATE pr_watch_targets SET title=?, url=?, author=?, is_draft=?, "
+                "state='open', status=?, last_seen_at=CURRENT_TIMESTAMP WHERE repo=? AND pr_number=?",
+                (pr["title"], pr["url"], author, is_draft, new_status, repo, num))
+            updated += 1
 
-    # incremental: filter by updatedAt if --since given
+    # mark PRs that are tracked but no longer open as closed
+    closed = 0
+    for r in conn.execute("SELECT repo, pr_number FROM pr_watch_targets WHERE state='open' OR state IS NULL").fetchall():
+        if (r[0], r[1]) not in seen_keys:
+            conn.execute("UPDATE pr_watch_targets SET state='closed', status='closed' WHERE repo=? AND pr_number=?", r)
+            closed += 1
+    conn.commit()
+    conn.close()
+    return inserted, updated, closed
+
+
+def build_queue(prs, max_prs, since_secs):
+    """From open PRs, build the review queue (new / head-changed only)."""
+    in_scope = [pr for pr in prs if not pr.get("isDraft")]
     if since_secs is not None:
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=since_secs)
-        in_scope = [
-            pr for pr in in_scope
-            if datetime.fromisoformat(pr["updatedAt"].replace("Z", "+00:00")) >= cutoff
-        ]
-
-    # dedup: only emit new or head-changed PRs
+        in_scope = [pr for pr in in_scope
+                    if datetime.fromisoformat(pr["updatedAt"].replace("Z", "+00:00")) >= cutoff]
     queue = []
     for pr in in_scope:
         repo = pr["repository"]["nameWithOwner"]
@@ -173,23 +213,47 @@ def main():
         if row:
             last_head, status = row
             if status in ("approved", "changes_requested", "comment"):
-                # already reviewed — check if head changed
                 cur = get_current_head(repo, num)
                 if cur and cur == last_head:
-                    continue  # same head, skip
+                    continue
                 reason = "head-changed"
         queue.append({
-            "repo": repo,
-            "pr_number": num,
-            "title": pr["title"],
-            "url": pr["url"],
-            "updated_at": pr["updatedAt"],
-            "reason": reason,
+            "repo": repo, "pr_number": num, "title": pr["title"], "url": pr["url"],
+            "author": (pr.get("author") or {}).get("login", "?"),
+            "updated_at": pr["updatedAt"], "reason": reason,
         })
+    return queue[:max_prs]
 
-    # cap parallel intake
-    queue = queue[:max_prs]
-    print(json.dumps({"count": len(queue), "queue": queue}, indent=2, ensure_ascii=False))
+
+def main():
+    args = sys.argv[1:]
+    max_prs = 200
+    since_secs = None
+    target_repo = None
+    do_sync = "--sync" in args
+    if "--max" in args:
+        max_prs = int(args[args.index("--max") + 1])
+    if "--since" in args:
+        since_secs = int(args[args.index("--since") + 1])
+    if "--repo" in args:
+        target_repo = args[args.index("--repo") + 1]
+
+    # Fetch: single repo (all authors) OR all 3 orgs (all authors, incl bots)
+    if target_repo:
+        prs = gh_list_repo_prs(target_repo)
+    else:
+        prs = gh_search_org_prs()
+
+    result = {"total_open": len(prs)}
+
+    if do_sync:
+        ins, upd, clo = sync_to_sqlite(prs)
+        result["sync"] = {"inserted": ins, "updated": upd, "closed": clo}
+
+    queue = build_queue(prs, max_prs, since_secs)
+    result["count"] = len(queue)
+    result["queue"] = queue
+    print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":
