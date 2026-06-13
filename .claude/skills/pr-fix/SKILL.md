@@ -94,14 +94,16 @@ ANY of the following triggers Tier C:
 → **STOP. Report with suggestions, no code written:**
 
 ```
-⚠️  SUGGEST-ONLY — AAStarCommunity/SuperPaymaster#5  [Tier C: too large / too risky]
+🚫 SUGGEST-ONLY — AAStarCommunity/SuperPaymaster#5  [Tier C: too large / too risky]
+   PR URL: https://github.com/AAStarCommunity/SuperPaymaster/pull/5
+   Branch: <headRefName>
 
 Reason: <one sentence — e.g. "Core contract logic change + >200 logic lines, risk of
          unintended state machine effects">
 
 Review findings:
-  [High] F1: ...
-  [High] F2: ...
+  [High] F1: file:line — issue description
+  [High] F2: file:line — issue description
 
 Suggested approach:
   Option A: <description + risk>
@@ -111,18 +113,40 @@ Recommendation: <which option and why>
 
 Suggested next step: Handle this directly in the business repo
   cd /Users/jason/Dev/aastar/SuperPaymaster
-  git checkout <branch>
-  # Then open Claude Code session there for full context
+  git checkout <headRefName>
+  # Start a Claude Code session there for full context
+  # Or copy the PR URL above to share with the repo maintainer
 ```
 
 **No files are created or modified in Tier C.** Only report and suggest.
+Always include the PR URL prominently so the user can copy it to the relevant repo.
+
+## What "self-review" means here
+
+**Self-review = internal fix quality check, NOT the official clestons review.**
+
+Before pushing, we run a mini-pipeline on the *fix diff* (not the original PR diff) to
+catch mistakes in the fix itself:
+- 2-round: DeepSeek R1 flags issues → Sonnet decides go/no-go
+- 4-round: DeepSeek R1 → Sonnet R2 challenge → Codex PK → Opus final verdict
+
+After self-review passes and the fix is pushed, we then add `clestons` as reviewer
+(`gh pr edit --add-reviewer clestons`). That triggers the official `$pr-daemon-loop`
+review cycle, which is a separate, independent review of the full updated PR.
+
+```
+fix diff self-review (jhfnetboy internal)     official PR review (clestons)
+─────────────────────────────────────────     ──────────────────────────────
+DeepSeek R1  →  Sonnet [→ Codex → Opus]   →  push  →  $pr-daemon-loop reviews full PR
+"is the fix itself correct?"                  "is the whole PR ready to merge?"
+```
 
 ## Roles
 
 | Role | Model | When |
 |------|-------|------|
 | Triage + comment parsing + fix drafting | Sonnet (this session) | always |
-| Mechanical review of fix diff | DeepSeek API | R1, both paths |
+| Mechanical review of **fix diff** | DeepSeek API | R1, both paths |
 | Challenge (code/security changes) | Sonnet (this session) | R2, 4-round only |
 | Final authority on fix quality | Opus subagent | 4-round only |
 | PK adversary | Codex agent | 4-round only |
@@ -349,7 +373,9 @@ After each PR processed:
    <plan text — user must reply before fix proceeds>
 
 🚫 OWNER/REPO#N  [TIER C] SUGGEST-ONLY
-   <reason + suggestions>
+   PR URL: https://github.com/OWNER/REPO/pull/N
+   Branch: <headRefName>
+   <reason + option A/B + recommendation>
 ```
 
 ## What to SKIP (report to user instead of fixing)
