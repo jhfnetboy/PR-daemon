@@ -1,6 +1,6 @@
 ---
 name: pr-fix
-description: Fix jhfnetboy's own PRs that have REQUEST_CHANGES or APPROVE+comments needing follow-up. Checks out local repo, makes code fixes, self-reviews with DeepSeek+Sonnet+Opus (4-round) or DeepSeek+Sonnet (2-round), then commits and pushes as jhfnetboy. Only handles jhfnetboy's own PRs. Triggered by "$pr-fix", "$pr-fix OWNER/REPO", or "$pr-fix OWNER/REPO#N".
+description: Fix jhfnetboy's own PRs that have REQUEST_CHANGES or APPROVE+comments. Three-tier escalation: auto-fix simple changes, show plan+await approval for complex changes, suggest-only for very large/high-risk PRs. Triggered by "$pr-fix", "$pr-fix OWNER/REPO", or "$pr-fix OWNER/REPO#N".
 origin: pr-daemon
 ---
 
@@ -26,18 +26,109 @@ path of the PR-Daemon repo. When installed directly in the project, run from the
 > ⛔ **ABSOLUTE CONSTRAINT #5 — Skip ambiguous comments, report to user**
 > If a review comment is subjective, architectural, or unclear — do NOT guess. Mark it `SKIP` and report it. The user decides.
 
+## Three-Tier Escalation (CRITICAL — classify every PR before touching anything)
+
+### Tier A — AUTO-FIX (execute autonomously)
+
+ALL of the following must be true:
+- Fix type: docs / typo / comment / style / parameter rename / dep bump / adding a comment
+- OR: single-function code fix with a 1:1 mapping from review comment to code line
+- Changed logic lines ≤ 30 (net insertions/deletions of non-blank, non-comment lines)
+- Does NOT redesign a flow or change a public API contract
+- Risk: Low — even if the fix is wrong, the blast radius is contained to one function
+
+→ **Proceed directly** through Steps 1–8 without user confirmation.
+
+### Tier B — PLAN-FIRST (show fix plan, wait for user approval)
+
+ANY of the following triggers Tier B:
+- Touches multiple files across different modules (>2 files in different dirs)
+- Code fix involves logic restructuring, not just a parameter/key format change
+- Changes a public API signature, auth flow, or data schema
+- The review comment says "refactor", "redesign", "rethink", "move", "replace"
+- 4-round triage (security-sensitive) AND changed logic lines > 30
+- Fix requires understanding call chains beyond the immediate function
+
+→ **STOP. Show the plan first:**
+
+```
+🔍 PLAN REQUIRED — MushroomDAO/CometENS#4  [Tier B: complex]
+
+Review findings to address:
+  [High] F1: nonce key missing chainId — consumeNonce() in workers/api/src/index.ts
+  [Medium] F2: gateway singleton stale env — workers/gateway/src/index.ts
+
+Proposed fix plan:
+  1. consumeNonce(kv, from, nonce, deadline)
+       → consumeNonce(kv, chainId, from, nonce, deadline)
+       key: nonce:${from}:${nonce} → nonce:${chainId}:${from}:${nonce}
+       Callers: 7 call sites in handleManage()
+       Files: workers/api/src/index.ts only
+       Risk: Low — key format change breaks no existing sessions (nonces are one-time-use)
+
+  2. getGateway() singleton key
+       Current: `${env.ETH_RPC_URL}|${env.OP_RPC_URL}|${env.NETWORK}`
+       Proposal: add comment clarifying L2_RECORDS_ADDRESS is read per-request
+       Files: workers/gateway/src/index.ts only
+       Risk: Informational — no logic change
+
+Self-review: 4-round (security-sensitive)
+Estimated diff: ~25 lines
+
+Approve this plan? (reply "yes" / "no" / "change X to Y")
+```
+
+**Do NOT write any code or touch any file until the user replies "yes" (or a variant).** If the user requests changes to the plan, update the plan and show it again. Only after explicit approval proceed to Steps 3–8.
+
+### Tier C — SUGGEST ONLY (no code changes, no file edits)
+
+ANY of the following triggers Tier C:
+- Changed logic lines > 150 in the PR diff (very large PR)
+- Touches core contract (`contracts/src/*.sol`) in non-trivial ways (not just adding a comment)
+- Cross-cutting: fix requires coordinated changes across ≥ 3 modules or ≥ 2 repos
+- Security critical involving token economics, upgrade proxies, access control role assignments, or fee/reward math
+- The fix requires running tests you cannot run locally (e.g., real hardware, deployed testnet state)
+- The review comment explicitly says "consider a different architecture" or "this needs a design discussion"
+- Multiple prior RC rounds with no APPROVE → PR has a systemic issue, not a one-shot fix
+
+→ **STOP. Report with suggestions, no code written:**
+
+```
+⚠️  SUGGEST-ONLY — AAStarCommunity/SuperPaymaster#5  [Tier C: too large / too risky]
+
+Reason: <one sentence — e.g. "Core contract logic change + >200 logic lines, risk of
+         unintended state machine effects">
+
+Review findings:
+  [High] F1: ...
+  [High] F2: ...
+
+Suggested approach:
+  Option A: <description + risk>
+  Option B: <description + risk>
+
+Recommendation: <which option and why>
+
+Suggested next step: Handle this directly in the business repo
+  cd /Users/jason/Dev/aastar/SuperPaymaster
+  git checkout <branch>
+  # Then open Claude Code session there for full context
+```
+
+**No files are created or modified in Tier C.** Only report and suggest.
+
 ## Roles
 
 | Role | Model | When |
 |------|-------|------|
-| Comment parsing + fix drafting | Sonnet (this session) | always |
+| Triage + comment parsing + fix drafting | Sonnet (this session) | always |
 | Mechanical review of fix diff | DeepSeek API | R1, both paths |
 | Challenge (code/security changes) | Sonnet (this session) | R2, 4-round only |
 | Final authority on fix quality | Opus subagent | 4-round only |
 | PK adversary | Codex agent | 4-round only |
 | Final authority (docs/simple) | Sonnet (this session) | 2-round |
 
-## Triage: 2-round vs 4-round
+## Review Rounds (Tier A auto-fix and Tier B post-approval)
 
 **2-round** (DeepSeek R1 → Sonnet verdict): ALL of these must be true:
 - Fix type is docs / typo / comment / style / formatting / dep version bump
@@ -76,7 +167,7 @@ The script:
 
 Work the queue top-to-bottom: `🔴` first (RC), then `🟡` (suggestions).
 
-## Step 2 — Parse review comments → fix plan
+## Step 2 — Parse review comments → classify tier
 
 For each open review comment or REQUEST_CHANGES body:
 
@@ -86,16 +177,20 @@ For each open review comment or REQUEST_CHANGES body:
    - `QUESTION` — author asked something, not a change request → SKIP
    - `RESOLVED` — already addressed in a later commit → SKIP
 
-2. **Build a fix plan** for MECHANICAL items only:
+2. **Classify the PR tier** (A / B / C) using the criteria above.
+
+3. **Build a fix plan** for MECHANICAL items:
    ```
-   Comment: "warp::path::end() missing on openapi_spec route"
-   File: kms/host/src/api_server.rs
-   Fix: Add .and(warp::path::end()) after warp::path("openapi.yaml")
-   Risk: Low — routing only, no auth change
-   Triage: 2-round (docs endpoint, no logic change)
+   Comment: "nonce key missing chainId"
+   File: workers/api/src/index.ts
+   Fix: Add chainId param to consumeNonce(); change key to nonce:${chainId}:${from}:${nonce}
+   Callers affected: 7
+   Risk: Low — one-time-use nonces, key change doesn't break existing sessions
+   Triage: 4-round (security-sensitive)
+   Tier: B (4-round + multi-callsite, show plan first)
    ```
 
-3. If no MECHANICAL items → report to user, exit.
+4. If no MECHANICAL items → report to user, exit.
 
 ## Step 3 — Checkout local branch
 
@@ -228,7 +323,7 @@ After push:
 # Request review from clestons (the reviewer who raised the RC)
 gh pr edit N --repo OWNER/REPO --add-reviewer clestons
 
-# Or leave a comment explaining what was fixed
+# Leave a comment explaining what was fixed
 gh pr comment N --repo OWNER/REPO --body "$(cat <<'EOF'
 Addressed review comments:
 - [list each fix]
@@ -243,12 +338,18 @@ EOF
 
 After each PR processed:
 ```
-🔧 OWNER/REPO#N  FIXED  [2-round/4-round]
+🔧 OWNER/REPO#N  [TIER A|B] FIXED  [2-round/4-round]
    Fixed: <list of MECHANICAL items addressed>
    Skipped: <list of DESIGN/QUESTION items, with reason>
    Self-review: PASS (R1+R2[+R3+Opus])
    Pushed: <branch> @ <commit>
    Requested re-review from: clestons
+
+⚠️  OWNER/REPO#N  [TIER B] PENDING APPROVAL
+   <plan text — user must reply before fix proceeds>
+
+🚫 OWNER/REPO#N  [TIER C] SUGGEST-ONLY
+   <reason + suggestions>
 ```
 
 ## What to SKIP (report to user instead of fixing)
@@ -269,6 +370,8 @@ After each PR processed:
 - **Self-review MUST pass** before push — no exceptions
 - **Minimal diff** — fix only what the review comment says
 - **Max 3 self-review iterations** — escalate to user if still failing
+- **Tier B: NO CODE before user says yes** — show plan, wait, only proceed after explicit approval
+- **Tier C: NO CODE, NO FILES** — only report and suggest
 - **NEVER use `gh pr review`** for re-requesting — use `gh pr edit --add-reviewer` or a comment
 - **Always verify git identity** before committing: `git config user.name` should be jhfnetboy
 - **Skip + report** is always safer than a wrong fix

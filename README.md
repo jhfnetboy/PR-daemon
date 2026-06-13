@@ -154,24 +154,64 @@ $pr-fix MushroomDAO/CometENS     # 只扫一个仓库
 $pr-fix MushroomDAO/CometENS#4   # 只处理指定 PR
 ```
 
-**工作流程：**
+#### 三档升级策略（核心设计）
+
+`$pr-fix` 对每个 PR 先判断复杂度，然后按档处理：
+
+| 档位 | 触发条件 | 动作 |
+|------|---------|------|
+| **Tier A — 自动修复** | 文档/typo/style，或单函数 ≤30 行逻辑改动，风险低 | 直接执行：checkout → 修 → 自我 review → push → 请求复审 |
+| **Tier B — 先报方案** | 多文件/逻辑重构/公共 API 变更/4-round 且 >30 行 | **停下来**：展示修复方案 → 等用户确认 → 再动手 |
+| **Tier C — 仅给建议** | 逻辑改动 >150 行，或触碰核心合约非注释部分，或跨 ≥3 模块，或 token 经济/升级代理/权限角色 | **不动任何文件**：只分析 + 给出选项 + 建议去业务仓库直接处理 |
+
+**Tier B 示例输出（等你回复 "yes" 才动手）：**
+```
+🔍 PLAN REQUIRED — MushroomDAO/CometENS#4  [Tier B: complex]
+
+Review findings to address:
+  [High] F1: nonce key missing chainId + payer address
+
+Proposed fix plan:
+  consumeNonce(kv, from, nonce, deadline)
+    → consumeNonce(kv, chainId, from, nonce, deadline)
+    key: nonce:${from}:${nonce} → nonce:${chainId}:${from}:${nonce}
+  Callers: 7 call sites in handleManage()
+  Risk: Low — one-time-use nonces, key change doesn't break existing sessions
+
+Self-review: 4-round (security-sensitive)
+Approve this plan? (reply "yes" / "no" / "change X to Y")
+```
+
+**Tier C 示例输出（不动文件）：**
+```
+🚫 SUGGEST-ONLY — AAStarCommunity/SuperPaymaster#X  [Tier C: too large]
+
+Reason: Core contract logic change + >200 logic lines
+
+Suggested approach:
+  Option A: ... (risk: ...)
+  Option B: ... (risk: ...)
+
+Recommendation: Option A — because ...
+
+Suggested next step: Handle directly in the business repo
+  cd /Users/jason/Dev/aastar/SuperPaymaster && git checkout <branch>
+```
+
+**完整工作流（含 loop 联动）：**
 
 ```
-poll_fix_queue.py  →  解析 review comments  →  分类（MECHANICAL / DESIGN / QUESTION）
-    │
-    ├─ MECHANICAL：checkout 本地 branch → 应用最小修复 → 自我 review
-    │    ├─ 2-round（文档/typo/style）：DeepSeek R1 → Sonnet 拍板
-    │    └─ 4-round（代码/安全）：DeepSeek R1 → Sonnet R2 → Codex PK → Opus 拍板
-    │
-    ├─ DESIGN/QUESTION：跳过，报告给用户
-    └─ 自我 review 通过 → git push → 添加 clestons 为 reviewer
+$pr-daemon-loop
+    → 发现并 review 全组织所有 PR（clestons 账号发布 verdict）
+    ↓
+$pr-fix（jhfnetboy 账号）
+    → poll_fix_queue.py 扫出 RC / comment 的 PR
+    → 逐 PR 判档：Tier A 直接修 / Tier B 报方案等审批 / Tier C 仅建议
+    → 修复通过自我 review → push → 添加 clestons 为 reviewer
+    ↓
+$pr-daemon-loop 再次 review 更新后的 PR
+    → 循环直到 APPROVE
 ```
-
-**绝对约束（硬规则）：**
-- 只处理 jhfnetboy 自己的 PR，不碰他人 PR
-- 不 force push，不 --amend 已发布 commit
-- 自我 review 必须通过才能 push，最多 3 次迭代，否则上报用户
-- 最小 diff 原则：只改 review comment 指出的内容，不顺手重构
 
 #### Token 成本：Batch 自动 vs 直接进仓库
 
@@ -186,7 +226,7 @@ poll_fix_queue.py  →  解析 review comments  →  分类（MECHANICAL / DESIG
 | poll/classify/checkout 开销 | 0 | ~4k tok | ~4k tok |
 | **额外合计** | **0** | **~+17k tok** | **~+61k tok** |
 
-> **结论**：`$pr-fix` 2-round 额外开销约 17k token（~$0.002），4-round 约 61k token（~$0.006）。换来的是：不用手动进仓库、自动发现所有 RC 队列、4-round 安全保障（适合 `.sol`/`.ts` 关键代码）。对于纯文档 typo 等低风险修复，直接进仓库更轻量；对于安全敏感的 nonce/auth/payment 代码修复，4-round 的对抗式审查值得这点额外开销。
+> **什么时候用直接进仓库**：Tier C（太大/太复杂）的 PR，或者想完整利用业务仓库上下文的时候。`$pr-fix` 适合 Tier A/B 的批量自动化，节省手动切仓库的时间。
 
 ---
 
