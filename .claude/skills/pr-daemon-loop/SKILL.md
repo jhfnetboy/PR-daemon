@@ -12,11 +12,10 @@ Full architecture rationale: see PR_DAEMON_ROOT/DESIGN.md
 
 # PR Daemon Loop (v2 — Max-subscription driven, 3-round PK + 2/4 triage)
 
-> ⛔ **ABSOLUTE CONSTRAINT #1 — Merge rule**
-> **Human-authored PRs: NEVER merge.** Even after APPROVE, merging is the author's/maintainer's call.
-> **Bot-authored PRs (dependabot, renovate): APPROVE then merge** — no human owner, safe to auto-merge after APPROVE with no blocking findings.
-> Check PR author: `gh pr view N --repo OWNER/REPO --json author -q .author.login`
-> Bot authors: `dependabot[bot]`, `app/dependabot`, `renovate[bot]`, `renovate`.
+> ⛔ **ABSOLUTE CONSTRAINT #1 — Review only, NEVER merge**
+> Pure reviewer. NEVER merge any PR regardless of author (human or bot).
+> Merging is handled by `$pr-fix` after its review loop completes.
+> Allowed GitHub writes: post review / request changes / approve. Nothing else.
 >
 > ⛔ **ABSOLUTE CONSTRAINT #2 — One PR at a time, individually**
 > Each PR runs the full pipeline independently. No batch-scan-then-bulk-approve.
@@ -193,20 +192,6 @@ gh api user -q .login   # verify restored to main account
 ```
 Always use `post_pr_review.sh` (account switch). Never `gh pr review` directly.
 
-**Bot PR auto-merge (dependabot / renovate only):**
-
-If verdict is APPROVE AND PR author is a bot (dependabot[bot], renovate[bot]):
-
-```bash
-# Confirm author is a bot before merging
-PR_AUTHOR=$(gh pr view N --repo OWNER/REPO --json author -q .author.login)
-# Only proceed if author is a known bot
-gh pr merge N --repo OWNER/REPO --squash --auto
-gh api user -q .login   # verify account
-```
-
-Human-authored PRs: stop after posting APPROVE. Never merge.
-
 ## Step 7 — Score DeepSeek + record
 
 ```bash
@@ -259,15 +244,13 @@ If false-negative rate ≥ 5% → tighten 2-round criteria, push more PRs to 4-r
 [ ] verdict is APPROVE or REQUEST_CHANGES (not COMMENT)
 [ ] respected Codex's points one by one
 [ ] posted via post_pr_review.sh, verified account restored
-[ ] if bot PR + APPROVE → merged via gh pr merge --squash --auto
 [ ] scored DeepSeek (model_eval_db) + updated pr_watch_targets
 [ ] printed per-PR report (status counter + token cost)
 ```
 
 ## Hard Rules
 
-- **Bot PRs (dependabot/renovate): APPROVE → merge (`gh pr merge --squash --auto`).**
-- **Human PRs: NEVER merge.** `gh pr merge` forbidden for any human-authored PR.
+- **NEVER MERGE.** Pure reviewer — APPROVE or REQUEST_CHANGES only. `$pr-fix` handles merging.
 - **Final verdict is Claude Code's**, but respect DeepSeek + Codex (especially Codex) feedback.
 - **Security-sensitive PRs always go 4-round** — no downgrade.
 - **Never COMMENT-limbo** — always APPROVE or REQUEST_CHANGES.

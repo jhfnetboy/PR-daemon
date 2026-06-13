@@ -1,6 +1,6 @@
 ---
 name: pr-fix
-description: Fix jhfnetboy's own PRs that have REQUEST_CHANGES or APPROVE+comments. Three-tier escalation: auto-fix simple changes, show plan+await approval for complex changes, suggest-only for very large/high-risk PRs. Triggered by "$pr-fix", "$pr-fix OWNER/REPO", or "$pr-fix OWNER/REPO#N".
+description: Fix and merge PRs across two categories — (1) jhfnetboy's own PRs with RC/comments: fix code, self-review, push, loop with pr-daemon-loop until APPROVE; (2) Bot PRs (dependabot/renovate): inline review, merge if clean, report to user if RC. Three-tier escalation for human PRs. Triggered by "$pr-fix", "$pr-fix OWNER/REPO", or "$pr-fix OWNER/REPO#N".
 origin: pr-daemon
 ---
 
@@ -11,8 +11,9 @@ path of the PR-Daemon repo. When installed directly in the project, run from the
 
 # PR Fix Skill — Autonomous self-fix for jhfnetboy's PRs
 
-> ⛔ **ABSOLUTE CONSTRAINT #1 — jhfnetboy PRs only**
-> ONLY process PRs authored by `jhfnetboy`. Never touch other people's PRs, even if RC'd.
+> ⛔ **ABSOLUTE CONSTRAINT #1 — Two categories only**
+> Process only: (A) PRs authored by `jhfnetboy`, and (B) Bot PRs authored by `dependabot[bot]`, `app/dependabot`, `renovate[bot]`, `renovate`.
+> Never touch PRs by other humans, even if RC'd.
 >
 > ⛔ **ABSOLUTE CONSTRAINT #2 — No force push, no --amend to published commits**
 > Always add NEW commits on top of the existing branch. Never rewrite history that's already on the remote.
@@ -167,29 +168,54 @@ DeepSeek R1  →  Sonnet [→ Codex → Opus]   →  push  →  $pr-daemon-loop 
 
 ## Step 1 — Discover PRs needing fixes
 
-Use the automated discovery script:
-
 ```bash
-# Scan all 3 orgs — finds jhfnetboy's PRs with RC or human reviewer comments
+# Scan all 3 orgs — both jhfnetboy PRs and bot PRs
 python3 PR_DAEMON_ROOT/scripts/poll_fix_queue.py --needs-fix-only
 
-# Single repo
-python3 PR_DAEMON_ROOT/scripts/poll_fix_queue.py --repo OWNER/REPO --needs-fix-only
+# Only jhfnetboy's own PRs
+python3 PR_DAEMON_ROOT/scripts/poll_fix_queue.py --human-only --needs-fix-only
 
-# Single PR  (also works: $pr-fix OWNER/REPO#N)
+# Only bot PRs (dependabot / renovate)
+python3 PR_DAEMON_ROOT/scripts/poll_fix_queue.py --bot-only --needs-fix-only
+
+# Single repo or PR
+python3 PR_DAEMON_ROOT/scripts/poll_fix_queue.py --repo OWNER/REPO --needs-fix-only
 python3 PR_DAEMON_ROOT/scripts/poll_fix_queue.py --repo OWNER/REPO --pr N
 
-# JSON output for programmatic use
+# JSON for programmatic use
 python3 PR_DAEMON_ROOT/scripts/poll_fix_queue.py --needs-fix-only --output json
 ```
 
-The script:
-- Filters out CI bots (`github-actions[bot]`, `chatgpt-codex-connector[bot]`, etc.)
-- Keeps `clestons` comments (primary reviewer account)
-- Returns per-PR: review bodies + inline comment text + file/line location
-- Prints `🔴` for CHANGES_REQUESTED, `🟡` for APPROVED+comments, `✅` for clean
+Output icons:
+- `🔴` jhfnetboy PR — CHANGES_REQUESTED, needs code fix
+- `🟡` jhfnetboy PR — APPROVED + reviewer comments, needs follow-up
+- `🤖` Bot PR (dependabot/renovate) — unreviewed or RC, needs review+merge action
+- `✅` clean, skip
 
-Work the queue top-to-bottom: `🔴` first (RC), then `🟡` (suggestions).
+**Queue priority:** 🔴 first → 🤖 second → 🟡 last
+
+## Step 1b — Bot PR path (🤖 PRs, separate from human PR flow)
+
+Bot PRs (dependabot / renovate) cannot push new commits — they follow a different path:
+
+```
+For each 🤖 bot PR:
+  1. Run inline pr-daemon-loop review (same 2/4-round pipeline, clestons posts verdict)
+  2. Check verdict:
+     APPROVE (no blocking findings):
+       → gh pr merge N --repo OWNER/REPO --squash --auto   # jhfnetboy account
+       → verify: gh api user -q .login  # must be jhfnetboy
+       → report: ✅ OWNER/REPO#N merged (bot PR, clean)
+     CHANGES_REQUESTED (has blocking findings):
+       → Tier C report to user — cannot auto-fix bot PR
+       → Include PR URL + findings + suggestion
+       → Do NOT merge, do NOT modify any files
+```
+
+Bot PR triage is always **2-round** (dependency bump = low risk by default) UNLESS:
+- the diff touches non-trivial code (e.g. a major version bump with breaking API changes) → 4-round
+
+After handling all 🤖 bot PRs, continue to Step 2 for 🔴/🟡 human PRs.
 
 ## Step 2 — Parse review comments → classify tier
 
@@ -451,7 +477,10 @@ if verdict == CHANGES_REQUESTED:
 
 ## Hard Rules
 
-- **jhfnetboy's PRs only** — never touch other authors' PRs
+- **Two categories only** — jhfnetboy's PRs (fix+review loop) and bot PRs (review+merge). Never touch other human PRs.
+- **Bot PRs: merge only after APPROVE with no blocking findings** — use `gh pr merge --squash --auto` as jhfnetboy
+- **Bot PRs with RC: Tier C report, never merge** — cannot auto-fix; report to user with PR URL
+- **Human PRs: NEVER merge** — APPROVE is the endpoint; merging is the author's call
 - **No force push** — new commits only
 - **Self-review MUST pass** before push — no exceptions
 - **Minimal diff** — fix only what the review comment says
