@@ -52,41 +52,29 @@ path of the PR-Daemon repo. When installed directly in the project, run from the
 
 ## Step 1 — Discover PRs needing fixes
 
-Find jhfnetboy's PRs with review activity requiring action:
+Use the automated discovery script:
 
 ```bash
-# Get PRs in all 3 orgs authored by jhfnetboy
-gh search prs --author jhfnetboy --state open \
-  --json number,title,repository,url,reviewDecision,reviews \
-  --limit 100 | python3 -c "
-import json, sys
-prs = json.load(sys.stdin)
-for pr in prs:
-    rd = pr.get('reviewDecision', '')
-    repo = pr['repository']['nameWithOwner']
-    n = pr['number']
-    # Only 3 orgs
-    org = repo.split('/')[0]
-    if org not in ('AAStarCommunity', 'AuraAIHQ', 'MushroomDAO'):
-        continue
-    if rd in ('CHANGES_REQUESTED', 'REVIEW_REQUIRED', 'APPROVED'):
-        print(f'{rd:20s} {repo}#{n}  {pr[\"title\"][:60]}')
-"
+# Scan all 3 orgs — finds jhfnetboy's PRs with RC or human reviewer comments
+python3 PR_DAEMON_ROOT/scripts/poll_fix_queue.py --needs-fix-only
+
+# Single repo
+python3 PR_DAEMON_ROOT/scripts/poll_fix_queue.py --repo OWNER/REPO --needs-fix-only
+
+# Single PR  (also works: $pr-fix OWNER/REPO#N)
+python3 PR_DAEMON_ROOT/scripts/poll_fix_queue.py --repo OWNER/REPO --pr N
+
+# JSON output for programmatic use
+python3 PR_DAEMON_ROOT/scripts/poll_fix_queue.py --needs-fix-only --output json
 ```
 
-Or for a specific repo/PR from args:
-```bash
-# $pr-fix AAStarCommunity/SuperPaymaster#265
-# $pr-fix AAStarCommunity/SuperPaymaster
-```
+The script:
+- Filters out CI bots (`github-actions[bot]`, `chatgpt-codex-connector[bot]`, etc.)
+- Keeps `clestons` comments (primary reviewer account)
+- Returns per-PR: review bodies + inline comment text + file/line location
+- Prints `🔴` for CHANGES_REQUESTED, `🟡` for APPROVED+comments, `✅` for clean
 
-For each candidate PR, fetch review comments to understand what needs fixing:
-```bash
-gh pr view N --repo OWNER/REPO --json reviews,comments,reviewRequests,headRefName,headRefOid
-gh api repos/OWNER/REPO/pulls/N/reviews           # list reviews (state + body)
-gh api repos/OWNER/REPO/pulls/N/comments          # inline diff comments
-gh api repos/OWNER/REPO/issues/N/comments         # PR-level comments
-```
+Work the queue top-to-bottom: `🔴` first (RC), then `🟡` (suggestions).
 
 ## Step 2 — Parse review comments → fix plan
 
