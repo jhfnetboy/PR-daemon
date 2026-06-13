@@ -28,6 +28,43 @@ FINDINGS:
 <numbered list. each: [Critical|High|Medium|Low] file:line — issue <=15 words | fix <=12 words.
 Only real, concrete issues introduced by THIS diff. Empty list OK if none.>
 
+EVIDENCE RULE (HARD): Every finding MUST cite the exact diff line numbers that prove it.
+If you cannot point to a specific line in the diff, do NOT list the finding.
+Do NOT flag issues based on what a file might look like — only what the diff shows.
+Example of valid: "[High] src/foo.ts:142 — nonce key missing payer address | include `from` in key"
+Example of INVALID: "[Medium] contracts/Foo.sol:1 — missing SPDX header" (unless you see the file header in diff and it is absent)
+
+COUNTER-EVIDENCE CHECK (HARD — run before every finding):
+Before reporting ANY issue, scan the ENTIRE diff for code that already handles it.
+If you find any of the following, do NOT report the finding:
+- "missing retry logic" → search for: loop, attempt, retry, for i in, while attempts
+- "missing validation / bounds check" → search for: if len, if n !=, .len() <, checked_, ok_or
+- "missing error handling" → search for: is_err(), is_ok(), match.*Err, if let Err, unwrap_or
+- "undocumented behavior" → search for: comments (//), doc comments (///), or TODO near the code
+- "hardcoded value is wrong" → search for: a comment explaining WHY it is hardcoded
+If the fix already exists elsewhere in the diff, the finding is a FALSE POSITIVE — omit it.
+
+RUST SAFE PATTERNS (do NOT flag these as dangerous):
+- `.is_err()` / `.is_ok()` — returns bool, NEVER panics. Do NOT flag as "may panic".
+- `.unwrap_or(x)` / `.unwrap_or_else(|_| x)` — safe fallback, not a panic risk.
+- Only flag `.unwrap()` / `.expect()` / `panic!()` / `unreachable!()` as panic risks.
+- `Result<T,E>` propagated with `?` — safe, not a panic.
+
+INTENTIONAL DESIGN RULE: If a constant, hardcoded value, or non-obvious pattern has a
+comment (// or ///) explaining why it is intentional, do NOT flag it as a bug.
+You may list it as [Low] with "consider making configurable" only if the comment does NOT
+already address that concern.
+
+FRAMEWORK GUARDS (check before flagging):
+- Cloudflare Workers: bindings validated at deploy time, not runtime. Module-level state safe within one isolate (new deploy = new isolate). Do NOT flag "startup binding check" or "singleton stale state".
+- OP-TEE single-instance TA: invocations are serialized (CFG_CONCURRENT_SINGLE_INSTANCE_TA=n). Do NOT flag TOCTOU on read-then-write within same TA session unless multi-instance is explicitly enabled.
+- EIP-712 final digest: MUST use raw concat `\x19\x01 || domainSeparator || structHash`. Do NOT flag raw concat as wrong — encodeAbiParameters would pad to 32 bytes and break the digest.
+- Solidity imports: before flagging a missing import/SPDX/pragma, verify the diff does NOT already contain it.
+
+PAYMENT / NONCE SCOPE CHECK: For any code that constructs a nonce key or nonce store key,
+verify the key includes ALL required namespace dimensions: chainId + payer address (from/sender) + nonce value.
+A key of only `chainId:nonce` is a cross-payer nonce burning vulnerability.
+
 TRIAGE: <trivial|significant> — <reason <=15 words>
 (trivial = docs/chore/deps/license/format with no core-logic/security change;
  significant = feat / core logic / security-sensitive / API / migration / state)

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Post a PR review with the review GitHub account, then switch back to main.
+# Post a PR review with the review GitHub account.
+# PAT mode (PR_DAEMON_REVIEW_TOKEN set): uses GH_TOKEN env, no account switching.
+# Auth-switch mode (no token): switches to review user, restores main user on exit.
 
 set -euo pipefail
 
@@ -81,6 +83,8 @@ if [ -n "$REVIEW_TOKEN" ]; then
     echo "Review token belongs to $ACTIVE_USER, expected $EXPECTED_USER." >&2
     exit 1
   fi
+  # PAT mode: no account switching occurred, skip restore trap
+  trap - EXIT
 elif ! gh auth switch --hostname "$HOST" --user "$EXPECTED_USER" >/dev/null 2>&1; then
   cat >&2 <<EOF
 Review account is not available in gh credential store.
@@ -125,4 +129,8 @@ else
 fi
 run_gh api --method POST "repos/$REPO/pulls/$PR/reviews" --input "$PAYLOAD" >/dev/null
 
-echo "Posted PR review as $EXPECTED_USER. Restoring default account $MAIN_USER..."
+if [ -n "$REVIEW_TOKEN" ]; then
+  echo "Posted PR review as $EXPECTED_USER (via PAT, no account switch)."
+else
+  echo "Posted PR review as $EXPECTED_USER. Restoring default account $MAIN_USER..."
+fi
