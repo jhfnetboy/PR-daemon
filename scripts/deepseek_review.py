@@ -50,6 +50,11 @@ RUST SAFE PATTERNS (do NOT flag these as dangerous):
 - Only flag `.unwrap()` / `.expect()` / `panic!()` / `unreachable!()` as panic risks.
 - `Result<T,E>` propagated with `?` — safe, not a panic.
 
+DEDUPLICATION RULE (HARD): If the same issue pattern (same root cause) appears at multiple
+callsites, report it EXACTLY ONCE using the first occurrence. Do NOT repeat the same finding
+for every callsite. Example: if `ensure_not_frozen` is called before auth at lines 351, 360,
+369 — report it once at line 351 only. A single finding with "appears at N callsites" is fine.
+
 INTENTIONAL DESIGN RULE: If a constant, hardcoded value, or non-obvious pattern has a
 comment (// or ///) explaining why it is intentional, do NOT flag it as a bug.
 You may list it as [Low] with "consider making configurable" only if the comment does NOT
@@ -93,6 +98,36 @@ def load_key():
     return ""
 
 
+def _dedup_findings(content: str) -> str:
+    """Remove duplicate FINDINGS lines (same root cause repeated by the model)."""
+    lines = content.splitlines(keepends=True)
+    in_findings = False
+    seen: set[str] = set()
+    out = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("FINDINGS:"):
+            in_findings = True
+            out.append(line)
+            continue
+        if in_findings and stripped.startswith(("TRIAGE:", "SKELETON:", "FILES:")):
+            in_findings = False
+        if in_findings and stripped.startswith("["):
+            # Normalize: lowercase, collapse whitespace, drop leading number
+            key = stripped.lstrip("0123456789. ").lower()
+            # Use first ~60 chars as fingerprint (captures sev+file+issue)
+            fingerprint = key[:60]
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+        out.append(line)
+    deduped = len(lines) - len(out)
+    if deduped > 0:
+        import sys
+        sys.stderr.write(f"[deepseek R1] post-process: removed {deduped} duplicate finding line(s)\n")
+    return "".join(out)
+
+
 def main():
     args = sys.argv[1:]
     diff_file = args[args.index("--diff-file") + 1]
@@ -112,7 +147,8 @@ def main():
         "model": "deepseek-chat",
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.2,
-        "max_tokens": 2000,
+        "max_tokens": 3000,
+        "frequency_penalty": 0.5,
     }).encode()
 
     t0 = time.time()
@@ -125,6 +161,7 @@ def main():
         sys.exit(1)
 
     content = resp["choices"][0]["message"]["content"]
+    content = _dedup_findings(content)
     usage = resp.get("usage", {})
     dt = time.time() - t0
 
