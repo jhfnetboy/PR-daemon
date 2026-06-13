@@ -340,37 +340,97 @@ git push origin <branch>
 - `docs: address review — <what was fixed>` for docs-only
 - Always reference the original PR in the body if multi-item
 
-## Step 7 — Re-request review
+## Step 7 — Inline review cycle (fix → review → loop)
 
-After push:
+This is the core loop. After pushing, run the pr-daemon-loop pipeline inline for this
+single PR (as clestons), check the verdict, then decide whether to loop again.
+
+### 7a — Post fix comment + request review
+
 ```bash
-# Request review from clestons (the reviewer who raised the RC)
-gh pr edit N --repo OWNER/REPO --add-reviewer clestons
-
-# Leave a comment explaining what was fixed
 gh pr comment N --repo OWNER/REPO --body "$(cat <<'EOF'
-Addressed review comments:
-- [list each fix]
+Addressed review comments (Round <N>):
+- [list each fix applied]
 
 Self-review passed (DeepSeek R1 + Sonnet [+ Opus + Codex] — no blockers).
 Ready for re-review.
 EOF
 )"
+gh pr edit N --repo OWNER/REPO --add-reviewer clestons
 ```
 
-## Step 8 — Report
+### 7b — Run pr-daemon-loop pipeline for this PR (inline, as clestons)
 
-After each PR processed:
+Execute the full pr-daemon-loop review pipeline for OWNER/REPO#N:
+
+1. `gh pr diff N --repo OWNER/REPO > /tmp/pr-N-recheck.diff`
+2. `python3 PR_DAEMON_ROOT/scripts/compress_diff.py ...`
+3. R1 DeepSeek review
+4. Triage confirm (2-round or 4-round) — use same triage rules as pr-daemon-loop
+5. [2-round] Sonnet verdict directly
+   [4-round] Sonnet R2 → Codex PK → Opus verdict
+6. Write verdict to `/tmp/review-N-roundN.md`
+7. Post via `bash PR_DAEMON_ROOT/scripts/post_pr_review.sh --repo OWNER/REPO --pr N --body-file /tmp/review-N-roundN.md [--approve | --request-changes]`
+8. Verify account restored: `gh api user -q .login`
+
+Record the verdict: **APPROVE** or **CHANGES_REQUESTED**.
+
+### 7c — Loop decision
+
 ```
-🔧 OWNER/REPO#N  [TIER A|B] FIXED  [2-round/4-round]
+if verdict == APPROVE:
+    → go to Step 8 (done ✅)
+
+if verdict == CHANGES_REQUESTED:
+    loop_round += 1
+    if loop_round >= 3:
+        → ESCALATE: report to user — "3 fix rounds exhausted, same issues persist"
+        → show remaining findings, ask user how to proceed
+        → STOP loop
+    
+    # Check for no-progress: same finding IDs recur after fix
+    if new_findings ∩ prev_round_findings is substantial (>50% overlap):
+        → ESCALATE: report to user — "no progress after round N, findings unchanged"
+        → STOP loop
+    
+    # New findings or different issues — continue
+    → go back to Step 2 (parse new RC comments), next round
+```
+
+**Loop termination summary:**
+
+| Condition | Action |
+|-----------|--------|
+| APPROVE received | ✅ Done — report to user, ready to merge |
+| Tier C detected in any round | 🚫 Stop — suggest only, report |
+| Tier B plan rejected by user | ⏸ Stop — await user decision |
+| 3 rounds exhausted | ⚠️ Escalate — report to user, stop |
+| Same findings recur (no progress) | ⚠️ Escalate — report to user, stop |
+| Self-review DO_NOT_PUSH × 3 | ⚠️ Escalate — don't push, report |
+
+**NEVER merge.** When APPROVE is reached, report to user and stop. Merging is the author's call.
+
+## Step 8 — Final report
+
+```
+✅ OWNER/REPO#N  APPROVED after N fix round(s)
+   PR URL: https://github.com/OWNER/REPO/pull/N
+   Rounds: [Round 1: fixed X, Y → RC] [Round 2: fixed Z → APPROVE]
+   Total self-review rounds: N (2-round/4-round)
+   Ready to merge — this is your call.
+
+🔧 OWNER/REPO#N  [TIER A|B] ROUND N PUSHED — awaiting clestons review
    Fixed: <list of MECHANICAL items addressed>
-   Skipped: <list of DESIGN/QUESTION items, with reason>
-   Self-review: PASS (R1+R2[+R3+Opus])
+   Skipped: <DESIGN/QUESTION items>
+   Self-review: PASS
    Pushed: <branch> @ <commit>
-   Requested re-review from: clestons
 
-⚠️  OWNER/REPO#N  [TIER B] PENDING APPROVAL
-   <plan text — user must reply before fix proceeds>
+⚠️  OWNER/REPO#N  ESCALATED — <reason>
+   PR URL: https://github.com/OWNER/REPO/pull/N
+   <details for user>
+
+⚠️  OWNER/REPO#N  [TIER B] PENDING YOUR APPROVAL
+   <plan text>
 
 🚫 OWNER/REPO#N  [TIER C] SUGGEST-ONLY
    PR URL: https://github.com/OWNER/REPO/pull/N
@@ -395,9 +455,12 @@ After each PR processed:
 - **No force push** — new commits only
 - **Self-review MUST pass** before push — no exceptions
 - **Minimal diff** — fix only what the review comment says
-- **Max 3 self-review iterations** — escalate to user if still failing
+- **Max 3 fix rounds in the loop** — escalate to user if still RC after 3 rounds
+- **No-progress detection** — if >50% of findings recur unchanged, escalate immediately
+- **NEVER MERGE** — loop ends on APPROVE; merging is always the author's call
 - **Tier B: NO CODE before user says yes** — show plan, wait, only proceed after explicit approval
 - **Tier C: NO CODE, NO FILES** — only report and suggest
-- **NEVER use `gh pr review`** for re-requesting — use `gh pr edit --add-reviewer` or a comment
+- **NEVER use `gh pr review`** directly — always use `post_pr_review.sh`
 - **Always verify git identity** before committing: `git config user.name` should be jhfnetboy
+- **Always verify account restored** after each clestons post: `gh api user -q .login`
 - **Skip + report** is always safer than a wrong fix
