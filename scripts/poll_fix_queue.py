@@ -158,7 +158,16 @@ def fetch_issue_comments(repo, pr_number):
 # ──────────────────────────────────────────────────────────────
 
 def latest_review_decision(reviews):
-    states = {r["state"] for r in reviews}
+    # Per-reviewer latest state wins (GitHub semantics: a later APPROVE from the same
+    # reviewer supersedes an earlier CHANGES_REQUESTED from that same reviewer).
+    # Sort by submitted_at so the last entry per reviewer is the current one.
+    sorted_reviews = sorted(reviews, key=lambda r: r.get("submitted_at", ""))
+    latest_per_reviewer = {}
+    for r in sorted_reviews:
+        author = r.get("user", {}).get("login", "")
+        if author:
+            latest_per_reviewer[author] = r["state"]
+    states = set(latest_per_reviewer.values())
     if "CHANGES_REQUESTED" in states:
         return "CHANGES_REQUESTED"
     if "APPROVED" in states:
