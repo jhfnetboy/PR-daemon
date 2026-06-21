@@ -18,6 +18,27 @@ from urllib.error import URLError, HTTPError
 
 ROOT = Path(__file__).resolve().parent.parent
 
+SECURITY_PROMPT = """You are R1b of a multi-round PK code review — security-only lens.
+Examine ONLY security concerns in the diff below. Output EXACTLY these sections and NOTHING else.
+
+SECURITY_FINDINGS:
+<numbered list. each: [Critical|High|Medium|Low] file:line — issue <=15 words | fix <=12 words.
+Focus: auth bypass, missing access control, reentrancy, integer overflow/underflow, signature replay,
+EIP-712/EIP-191 misuse, unvalidated input from untrusted sources, hardcoded secrets/keys,
+insecure randomness, payment/token flow correctness (fund-at-risk), permission escalation,
+cross-contract call reentrancy, missing chainId/payer in nonce keys, approval/allowance races.
+Only real issues provable from the diff. Empty list OK if none.>
+
+EVIDENCE RULE (HARD): Every finding MUST cite the exact diff line numbers that prove it.
+Counter-evidence check: scan the ENTIRE diff for code that already handles the issue. If handled, omit.
+
+SECURITY_TRIAGE: clean|low|medium|high|critical — <reason <=10 words>
+
+PR: {repo}#{pr}
+DIFF:
+{diff}
+"""
+
 PROMPT = """You are R1 of a multi-round PK code review. From the diff below, output EXACTLY these
 sections and NOTHING else (no prose, no preamble). Be terse.
 
@@ -134,6 +155,7 @@ def main():
     repo = args[args.index("--repo") + 1] if "--repo" in args else "?"
     pr = args[args.index("--pr") + 1] if "--pr" in args else "?"
     output = args[args.index("--output") + 1] if "--output" in args else None
+    mode = args[args.index("--mode") + 1] if "--mode" in args else "full"
 
     key = load_key()
     if not key:
@@ -141,7 +163,8 @@ def main():
         sys.exit(1)
 
     diff = Path(diff_file).read_text()
-    prompt = PROMPT.format(repo=repo, pr=pr, diff=diff)
+    template = SECURITY_PROMPT if mode == "security" else PROMPT
+    prompt = template.format(repo=repo, pr=pr, diff=diff)
 
     body = json.dumps({
         "model": "deepseek-chat",
@@ -168,8 +191,9 @@ def main():
     if output:
         Path(output).write_text(content)
     print(content)
+    label = "deepseek R1b(sec)" if mode == "security" else "deepseek R1a(full)"
     sys.stderr.write(
-        f"[deepseek R1] {usage.get('prompt_tokens',0)} in + {usage.get('completion_tokens',0)} out "
+        f"[{label}] {usage.get('prompt_tokens',0)} in + {usage.get('completion_tokens',0)} out "
         f"= {usage.get('total_tokens',0)} tok, {dt:.1f}s\n"
     )
 

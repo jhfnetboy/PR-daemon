@@ -84,19 +84,15 @@ gh search prs --author jhfnetboy --state open --json number,title,repository,url
 
 ## Posting a Review
 
-Only after explicit user approval. `scripts/post_pr_review.sh` switches to `clestons`, posts, then switches back to `jhfnetboy`:
+Only after explicit user approval. `scripts/post_pr_review.sh` uses `PR_DAEMON_REVIEW_TOKEN` (PAT) — no account switching, no shell account affected:
 
 ```bash
 bash scripts/post_pr_review.sh --repo OWNER/REPO --pr PR_NUMBER --body-file FILE --request-changes
 bash scripts/post_pr_review.sh --repo OWNER/REPO --pr PR_NUMBER --body-file FILE --comment
+bash scripts/post_pr_review.sh --repo OWNER/REPO --pr PR_NUMBER --body-file FILE --approve
 ```
 
-Always verify the active GitHub account before and after posting:
-
-```bash
-gh api user -q .login
-bash scripts/ensure_main_github_account.sh   # restore to jhfnetboy
-```
+No account verification needed after posting. The script prints "via PAT, no account switch" on success.
 
 ## Model Evaluation
 
@@ -155,7 +151,7 @@ review_watch.py (watcher loop)
 | `run-dpsk-claude.sh` | Launch Claude Code on DeepSeek API (primary entry point) |
 | `scripts/model_eval_db.py` | SQLite CRUD for per-PR scoring and improvement items |
 | `scripts/resolve_repo.py` | Maps `OWNER/REPO` to local checkout path via `config/repo-roots.json` |
-| `scripts/post_pr_review.sh` | Posts GitHub review with account switching (always use this) |
+| `scripts/post_pr_review.sh` | Posts GitHub review via PAT (no account switching) |
 | `scripts/bootstrap_pr_daemon.sh` | One-time init: creates state dirs, initializes both SQLite DBs |
 | `scripts/review_watch.py` | Python watcher daemon (optional — Claude Code can run its own loop) |
 | `scripts/start_review_watch.sh` | Wraps watcher with nohup, PID file, metadata file |
@@ -214,6 +210,6 @@ After editing `scripts/review_watch.py`, `scripts/start_review_watch.sh`, or `wa
 - **Never merge PRs**, even after `APPROVE`. The PR author decides.
 - **Never modify business repo source, config, tests, or lock files** — local checkouts are read-only review context.
 - **Never post to GitHub without explicit user approval** in the current turn.
-- **Default active account must be `jhfnetboy`** — verify with `gh api user -q .login` before any GitHub operation.
+- **post_pr_review.sh uses PAT, no account switching** — do NOT run `gh api user -q .login` after posting, and do not say "账号已恢复".
 - Rapid-MLX cannot start inside the Codex/headless sandbox (`No Metal device available`). Start it from a normal macOS Terminal and reuse `http://127.0.0.1:8000/v1`.
 - Every completed review requires: explicit conclusion (`APPROVE`/`REQUEST_CHANGES`/`COMMENT`), GitHub comment posted, and both Markdown and SQLite records updated.

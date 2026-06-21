@@ -1,4 +1,4 @@
-Use $rapid-mlx-review to review MushroomDAO/whitelist#2 in PR-Daemon autonomous watch mode.
+Use $rapid-mlx-review to review MushroomDAO/launch#12 in PR-Daemon autonomous watch mode.
 
 Requirements:
 - Use the local repository if available; never clone to /tmp unless no configured local checkout exists.
@@ -11,10 +11,10 @@ Requirements:
 - Continue to treat local-model output as hypotheses, not final authority.
 
 PR metadata:
-- title: fix: README badge formatting — add missing newline
-- url: https://github.com/MushroomDAO/whitelist/pull/2
+- title: feat(site): AAStar + AuraAI landing pages + nav links + label fixes
+- url: https://github.com/MushroomDAO/launch/pull/12
 - base: main
-- head: chore/fix-badge-newline
-- head_oid: 5c566f10af41598569959be0f517fa925a299604
+- head: feat/aastar-auraai-pages
+- head_oid: b1757fcef1550925a119faddf96ef1d0b252d5a7
 - current_review_decision: 
 - latest_clestons_review: APPROVED

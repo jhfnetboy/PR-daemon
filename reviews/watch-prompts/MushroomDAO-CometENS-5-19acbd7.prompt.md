@@ -1,4 +1,4 @@
-Use $rapid-mlx-review to review MushroomDAO/whitelist#2 in PR-Daemon autonomous watch mode.
+Use $rapid-mlx-review to review MushroomDAO/CometENS#5 in PR-Daemon autonomous watch mode.
 
 Requirements:
 - Use the local repository if available; never clone to /tmp unless no configured local checkout exists.
@@ -11,10 +11,10 @@ Requirements:
 - Continue to treat local-model output as hypotheses, not final authority.
 
 PR metadata:
-- title: fix: README badge formatting — add missing newline
-- url: https://github.com/MushroomDAO/whitelist/pull/2
+- title: feat: Milestone B/C/D — NFT subdomains, plugin arch, proof scaffold, production hardening (v0.5.0)
+- url: https://github.com/MushroomDAO/CometENS/pull/5
 - base: main
-- head: chore/fix-badge-newline
-- head_oid: 5c566f10af41598569959be0f517fa925a299604
-- current_review_decision: 
-- latest_clestons_review: APPROVED
+- head: feat/milestone-bcd
+- head_oid: 19acbd79055c5e9131aa32565c62e1218de9ee82
+- current_review_decision: CHANGES_REQUESTED
+- latest_clestons_review: CHANGES_REQUESTED

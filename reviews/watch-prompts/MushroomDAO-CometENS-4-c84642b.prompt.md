@@ -1,4 +1,4 @@
-Use $rapid-mlx-review to review MushroomDAO/whitelist#2 in PR-Daemon autonomous watch mode.
+Use $rapid-mlx-review to review MushroomDAO/CometENS#4 in PR-Daemon autonomous watch mode.
 
 Requirements:
 - Use the local repository if available; never clone to /tmp unless no configured local checkout exists.
@@ -11,10 +11,10 @@ Requirements:
 - Continue to treat local-model output as hypotheses, not final authority.
 
 PR metadata:
-- title: fix: README badge formatting — add missing newline
-- url: https://github.com/MushroomDAO/whitelist/pull/2
+- title: feat: production API server (Phase 1-3) + security hardening
+- url: https://github.com/MushroomDAO/CometENS/pull/4
 - base: main
-- head: chore/fix-badge-newline
-- head_oid: 5c566f10af41598569959be0f517fa925a299604
+- head: feat/production-api-server
+- head_oid: c84642bf181fad9ce519a4b8166a34d13b6b0136
 - current_review_decision: 
 - latest_clestons_review: APPROVED

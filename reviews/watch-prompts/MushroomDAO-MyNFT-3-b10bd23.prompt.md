@@ -1,4 +1,4 @@
-Use $rapid-mlx-review to review MushroomDAO/whitelist#2 in PR-Daemon autonomous watch mode.
+Use $rapid-mlx-review to review MushroomDAO/MyNFT#3 in PR-Daemon autonomous watch mode.
 
 Requirements:
 - Use the local repository if available; never clone to /tmp unless no configured local checkout exists.
@@ -11,10 +11,10 @@ Requirements:
 - Continue to treat local-model output as hypotheses, not final authority.
 
 PR metadata:
-- title: fix: README badge formatting — add missing newline
-- url: https://github.com/MushroomDAO/whitelist/pull/2
+- title: docs: 三大能力总体设计 + 生态集成规范 + 调研参考子模块
+- url: https://github.com/MushroomDAO/MyNFT/pull/3
 - base: main
-- head: chore/fix-badge-newline
-- head_oid: 5c566f10af41598569959be0f517fa925a299604
+- head: feat/design-docs-and-submodules
+- head_oid: b10bd23c62a7c5b1995f8b1755d30cc32e7aed9d
 - current_review_decision: 
-- latest_clestons_review: APPROVED
+- latest_clestons_review:

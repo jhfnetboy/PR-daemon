@@ -1,4 +1,4 @@
-Use $rapid-mlx-review to review MushroomDAO/whitelist#2 in PR-Daemon autonomous watch mode.
+Use $rapid-mlx-review to review AAStarCommunity/aastar-sdk#15 in PR-Daemon autonomous watch mode.
 
 Requirements:
 - Use the local repository if available; never clone to /tmp unless no configured local checkout exists.
@@ -11,10 +11,10 @@ Requirements:
 - Continue to treat local-model output as hypotheses, not final authority.
 
 PR metadata:
-- title: fix: README badge formatting — add missing newline
-- url: https://github.com/MushroomDAO/whitelist/pull/2
+- title: [WIP] feat(m14): @aastar/react hooks + @aastar/xiaoheishu component library
+- url: https://github.com/AAStarCommunity/aastar-sdk/pull/15
 - base: main
-- head: chore/fix-badge-newline
-- head_oid: 5c566f10af41598569959be0f517fa925a299604
-- current_review_decision: 
+- head: feat/spore-m12-waku-transport
+- head_oid: 30b9f8c91a3269b18fcca73e91fa5348d543f21a
+- current_review_decision: APPROVED
 - latest_clestons_review: APPROVED
