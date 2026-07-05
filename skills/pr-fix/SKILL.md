@@ -5,7 +5,7 @@ origin: pr-daemon
 ---
 
 <!-- INSTALL NOTE
-When installed globally via install-skills.sh --global, PR_DAEMON_ROOT is patched to the absolute
+When installed globally via install-skills.sh --global, /Users/jason/Dev/tools/PR-Daemon is patched to the absolute
 path of the PR-Daemon repo. When installed directly in the project, run from the PR-Daemon root.
 -->
 
@@ -170,20 +170,20 @@ DeepSeek R1  →  Sonnet [→ Codex → Opus]   →  push  →  $pr-daemon-loop 
 
 ```bash
 # Scan all 3 orgs — both jhfnetboy PRs and bot PRs
-python3 PR_DAEMON_ROOT/scripts/poll_fix_queue.py --needs-fix-only
+python3 /Users/jason/Dev/tools/PR-Daemon/scripts/poll_fix_queue.py --needs-fix-only
 
 # Only jhfnetboy's own PRs
-python3 PR_DAEMON_ROOT/scripts/poll_fix_queue.py --human-only --needs-fix-only
+python3 /Users/jason/Dev/tools/PR-Daemon/scripts/poll_fix_queue.py --human-only --needs-fix-only
 
 # Only bot PRs (dependabot / renovate)
-python3 PR_DAEMON_ROOT/scripts/poll_fix_queue.py --bot-only --needs-fix-only
+python3 /Users/jason/Dev/tools/PR-Daemon/scripts/poll_fix_queue.py --bot-only --needs-fix-only
 
 # Single repo or PR
-python3 PR_DAEMON_ROOT/scripts/poll_fix_queue.py --repo OWNER/REPO --needs-fix-only
-python3 PR_DAEMON_ROOT/scripts/poll_fix_queue.py --repo OWNER/REPO --pr N
+python3 /Users/jason/Dev/tools/PR-Daemon/scripts/poll_fix_queue.py --repo OWNER/REPO --needs-fix-only
+python3 /Users/jason/Dev/tools/PR-Daemon/scripts/poll_fix_queue.py --repo OWNER/REPO --pr N
 
 # JSON for programmatic use
-python3 PR_DAEMON_ROOT/scripts/poll_fix_queue.py --needs-fix-only --output json
+python3 /Users/jason/Dev/tools/PR-Daemon/scripts/poll_fix_queue.py --needs-fix-only --output json
 ```
 
 Output icons:
@@ -246,7 +246,7 @@ For each open review comment or REQUEST_CHANGES body:
 
 ```bash
 # Resolve local path from config/repo-roots.json
-python3 PR_DAEMON_ROOT/scripts/resolve_repo.py OWNER/REPO
+python3 /Users/jason/Dev/tools/PR-Daemon/scripts/resolve_repo.py OWNER/REPO
 # → /Users/jason/Dev/aastar/SuperPaymaster
 
 # Verify git identity before touching anything
@@ -293,14 +293,14 @@ Get the fix diff:
 ```bash
 git diff HEAD > /tmp/fix-pr-N.diff
 # Compress if large
-python3 PR_DAEMON_ROOT/scripts/compress_diff.py --file /tmp/fix-pr-N.diff --budget 60000 > /tmp/fix-pr-N-compressed.diff
+python3 /Users/jason/Dev/tools/PR-Daemon/scripts/compress_diff.py --file /tmp/fix-pr-N.diff --budget 60000 > /tmp/fix-pr-N-compressed.diff
 ```
 
 ### 2-round path (docs/simple)
 
 **R1 — DeepSeek:**
 ```bash
-python3 PR_DAEMON_ROOT/scripts/deepseek_review.py \
+python3 /Users/jason/Dev/tools/PR-Daemon/scripts/deepseek_review.py \
   --diff-file /tmp/fix-pr-N-compressed.diff \
   --repo OWNER/REPO --pr N --output /tmp/fix-r1-N.md
 ```
@@ -390,13 +390,13 @@ gh pr edit N --repo OWNER/REPO --add-reviewer clestons
 Execute the full pr-daemon-loop review pipeline for OWNER/REPO#N:
 
 1. `gh pr diff N --repo OWNER/REPO > /tmp/pr-N-recheck.diff`
-2. `python3 PR_DAEMON_ROOT/scripts/compress_diff.py ...`
+2. `python3 /Users/jason/Dev/tools/PR-Daemon/scripts/compress_diff.py ...`
 3. R1 DeepSeek review
 4. Triage confirm (2-round or 4-round) — use same triage rules as pr-daemon-loop
 5. [2-round] Sonnet verdict directly
    [4-round] Sonnet R2 → Codex PK → Opus verdict
 6. Write verdict to `/tmp/review-N-roundN.md`
-7. Post via `bash PR_DAEMON_ROOT/scripts/post_pr_review.sh --repo OWNER/REPO --pr N --body-file /tmp/review-N-roundN.md [--approve | --request-changes]`
+7. Post via `bash /Users/jason/Dev/tools/PR-Daemon/scripts/post_pr_review.sh --repo OWNER/REPO --pr N --body-file /tmp/review-N-roundN.md [--approve | --request-changes]`
 8. Verify account restored: `gh api user -q .login`
 
 Record the verdict: **APPROVE** or **CHANGES_REQUESTED**.

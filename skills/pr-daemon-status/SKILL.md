@@ -11,7 +11,7 @@ Run the queries below and format the output as a clean dashboard. Call this any 
 ## Step 1 — Queue State (pr_watch_targets)
 
 ```bash
-STATE_DB="PR_DAEMON_ROOT/.state/pr-daemon/pr-watch.sqlite"
+STATE_DB="/Users/jason/Dev/tools/PR-Daemon/.state/pr-daemon/pr-watch.sqlite"
 
 # Total discovered
 sqlite3 "$STATE_DB" "SELECT COUNT(*) FROM pr_watch_targets;"
@@ -39,7 +39,7 @@ FROM pr_watch_targets WHERE status='reviewing';"
 ## Step 2 — Verdict Breakdown (model_review_runs)
 
 ```bash
-EVAL_DB="PR_DAEMON_ROOT/reviews/model-evals/model-evals.sqlite"
+EVAL_DB="/Users/jason/Dev/tools/PR-Daemon/reviews/model-evals/model-evals.sqlite"
 
 # Total reviews posted
 sqlite3 "$EVAL_DB" "SELECT COUNT(*) FROM model_review_runs;"
@@ -63,7 +63,7 @@ ORDER BY created_at DESC LIMIT 10;"
 ## Step 2.5 — Token Cost (cumulative)
 
 ```bash
-python3 PR_DAEMON_ROOT/scripts/token_cost.py --status
+python3 /Users/jason/Dev/tools/PR-Daemon/scripts/token_cost.py --status
 ```
 
 Pricing: DeepSeek V4 Pro · Input $0.435/M · Cache-hit $0.003625/M · Output $0.87/M

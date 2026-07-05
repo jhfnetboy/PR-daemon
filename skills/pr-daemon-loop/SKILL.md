@@ -1,113 +1,190 @@
 ---
 name: pr-daemon-loop
-description: Full 24/7 autonomous PR review loop (v2). Claude Code (Max subscription) orchestrates a 3-round PK review with smart 2/4-round triage. DeepSeek does cheap grunt work + initial review, Claude challenges, Codex PKs, Opus makes the final verdict. Use when the user says "run PR daemon", "start 24/7 review", "用 $pr-daemon-loop 开始", "/pr-daemon-loop", or "start the review loop".
+description: Full 24/7 autonomous PR review loop (v4). Sonnet=pure executor, DeepSeek=dual-pass R1 (full+security parallel), Opus=R2 strategic independent reviewer + final verdict, Codex=R3 adversarial PK against Opus findings. Evaluate vs v3 after each PR.
 origin: pr-daemon
 ---
 
-<!-- INSTALL NOTE
-When installed globally via install-skills.sh --global, PR_DAEMON_ROOT is patched to the absolute
-path of the PR-Daemon repo. When used directly in the project, run from the PR-Daemon root directory.
-Full architecture rationale: see PR_DAEMON_ROOT/DESIGN.md
+<!-- ROLLBACK:
+  v4 → v3: cp ~/.claude/skills/pr-daemon-loop/SKILL.md.bak-v3-20260619 ~/.claude/skills/pr-daemon-loop/SKILL.md
+  v3 → v2: cp ~/.claude/skills/pr-daemon-loop/SKILL.md.bak-20260614 ~/.claude/skills/pr-daemon-loop/SKILL.md
 -->
 
-# PR Daemon Loop (v2 — Max-subscription driven, 3-round PK + 2/4 triage)
+# PR Daemon Loop (v4 — Opus strategic R2 + dual DeepSeek + Sonnet executor)
 
-> ⛔ **ABSOLUTE CONSTRAINT #1 — No Merge**
-> Review-only system. NEVER merge any PR. Even after APPROVE, merging is the author's/maintainer's call.
-> Allowed GitHub writes: post review / request changes / approve. Nothing else. No `gh pr merge`.
+> ⛔ **ABSOLUTE CONSTRAINT #1 — Review only, NEVER merge**
+> Pure reviewer. NEVER merge any PR regardless of author (human or bot).
+> Merging is handled by `$pr-fix` after its review loop completes.
+> Allowed GitHub writes: post review / request changes / approve. Nothing else.
 >
 > ⛔ **ABSOLUTE CONSTRAINT #2 — One PR at a time, individually**
 > Each PR runs the full pipeline independently. No batch-scan-then-bulk-approve.
 >
-> ⛔ **ABSOLUTE CONSTRAINT #3 — Final verdict is yours (Claude Code), but respect the panel**
-> YOU make the final APPROVE/REQUEST_CHANGES call. But you MUST respect DeepSeek's and especially
-> Codex's feedback — address Codex's points one by one; do not dismiss a Codex finding without
-> concrete counter-evidence. Codex is the senior adversary.
+> ⛔ **ABSOLUTE CONSTRAINT #3 — Opus is final authority for 4-round; respect Codex point-by-point**
+> Opus makes the final APPROVE/REQUEST_CHANGES call on 4-round PRs.
+> Do NOT dismiss a Codex finding without concrete counter-evidence.
 >
 > ⛔ **ABSOLUTE CONSTRAINT #4 — 3 orgs only**
 > Only review PRs in `AAStarCommunity`, `AuraAIHQ`, `MushroomDAO`. Never review personal (jhfnetboy) PRs.
 
-## Roles & Models
+## Roles & Models (v4 division)
 
-| Role | Model | Cost | Decides verdict? |
-|------|-------|------|------------------|
-| Grunt work + initial review | DeepSeek API | ~$0.001/PR | ❌ |
-| Challenge / orchestration | Sonnet (this session) | subscription | ❌ |
-| PK adversary | Codex (Agent tool) | Plus $20/mo | ❌ |
-| **Final verdict** | **Opus subagent** (4-round) or Sonnet (2-round) | subscription | ✅ |
+| Role | Model | Job | Judgment? |
+|------|-------|-----|-----------|
+| **Executor** | Sonnet (this session) | fetch, compress, scripts, format, 2-round verdict | ✅ 2-round only |
+| **R1a — full pass** | DeepSeek API | full mechanical review: files, findings, triage, skeleton | ❌ |
+| **R1b — security pass** | DeepSeek API | security-only lens (auth/crypto/payment/permission/state) in parallel with R1a | ❌ |
+| **R2 — strategic reviewer** | Opus subagent | reads compressed diff independently; challenges R1 findings; adds cross-file/architectural analysis | ❌ confirms/adds |
+| **R3 — PK adversary** | Codex (Agent tool) | adversarial challenge of Opus R2's findings (targeted hunks only) | ❌ |
+| **Final verdict** | Opus subagent (2nd call) | full diff + all round context → APPROVE/REQUEST_CHANGES + missed-finding scan | ✅ 4-round |
 
-**Sonnet→Opus**: run the loop on Sonnet for cost. For 4-round PRs, spawn an Opus subagent
-(`Agent(model="opus")`) for the final high-stakes verdict. 2-round PRs: Sonnet decides directly.
+**Key v4 changes from v3:**
+- Sonnet no longer challenges findings (was R2 in v3). Sonnet = executor only.
+- DeepSeek runs TWO parallel passes (R1a full + R1b security).
+- Opus is elevated to R2 independent strategic reviewer — reads the diff itself, not just Sonnet's summary.
+- Codex PK now challenges Opus R2 findings (more meaningful than challenging Sonnet's R2).
+- Opus makes two calls: R2 (reviewer) + R4 (final verdict). Same model, separate focus.
 
-## The Loop
+## The v4 Loop
 
 ```
 poll_prs.py → for each PR:
-  R1  DeepSeek initial review + triage proposal
+  R1a  DeepSeek full review     ┐
+  R1b  DeepSeek security-only  ┘ (parallel)
+  ▼   Sonnet merges R1a+R1b, deduplicates, formats working list
   ▼   triage confirm (2-round vs 4-round)
-  ├─ 2-round: Sonnet verdict
-  └─ 4-round: R2 Sonnet challenge → R3 Codex PK → Opus verdict
-  ▼   score DeepSeek, record triage, post, next PR
+  ├─ 2-round: Sonnet verdict (low-risk docs/chore, no Opus)
+  └─ 4-round:
+       R2  Opus reads compressed diff independently → strategic findings + R1 challenge
+       ▼   post-R2 severity gate
+       ├─ all Low/suggestions → SKIP Codex → Opus R4 final (full diff + missed scan)
+       └─ any Medium+ → R3 Codex targeted PK (±20 lines per Opus-confirmed Medium+ finding)
+                       → R4 Opus final (full diff + all rounds → verdict +补扫)
+  ▼   record per-round stats → model_eval_db → post → next PR
 ```
 
 ## Token discipline (read first)
 
-To save tokens: **DeepSeek does the heavy lifting, Claude only does hard judgment.**
-- Read/compress the diff **ONCE**. Pass the SAME compressed diff forward to every round.
-- Subagents (Codex R3, Opus verdict) get the diff + prior findings **inline in the prompt** —
-  never tell them to re-fetch `gh pr diff`.
-- Use the concise templates in `config/review_templates.md`. No preamble, no postamble, no praise.
-- Each round outputs **deltas only** (confirm/reject/add), not a full re-derivation.
+- Read/compress the diff **ONCE** → `/tmp/pr-N-compressed.diff`. Reuse everywhere.
+- **R1a and R1b run in parallel** via two `deepseek_review.py` calls (different system prompts).
+- **Opus R2 gets the compressed diff** — reads it independently; gets R1a+R1b merged list as additional context (not as the only truth).
+- **Codex gets targeted hunks** (±20 lines per Opus-confirmed Medium+ finding), NOT full diff.
+- **Opus R4 gets full compressed diff** — missed-finding scan requires full context.
+- Each round outputs **deltas only** — CONFIRM/REJECT/ADD, not re-derivation.
+- Never tell subagents to re-fetch `gh pr diff`.
+
+## Step 0 — Check PR state (MANDATORY first action)
+
+**Before fetching any diff or running any review step**, verify the PR is still open:
+
+```bash
+gh pr view N --repo OWNER/REPO --json state,mergedAt
+```
+
+- `state == "OPEN"` → proceed to Step 1
+- `state == "MERGED"` or `"CLOSED"` → **STOP. Skip entirely.** Report: "OWNER/REPO#N is already merged/closed — skipped."
+
+This applies to every review request, including re-reviews and user-directed `sp N` / `kms N` commands.
 
 ## Step 1 — Sync + discover PRs
 
-**At the start of every loop cycle, run with `--sync`** to mirror ALL open PRs into SQLite
-(every author, including bots — the goal is to clear every PR). This keeps `pr-watch.sqlite`
-an accurate live snapshot: new→`needs_review`, head-moved→`needs_review`, gone→`closed`.
+**At the start of every loop cycle, run with `--sync`** to mirror ALL open PRs into SQLite:
 
 **Org-scan mode** (all 3 orgs, ALL authors incl. dependabot):
 ```bash
-python3 PR_DAEMON_ROOT/scripts/poll_prs.py --sync --max 200
+python3 /Users/jason/Dev/tools/PR-Daemon/scripts/poll_prs.py --sync --max 200
 ```
 **Single-repo mode** (one repo, all its open PRs):
 ```bash
-python3 PR_DAEMON_ROOT/scripts/poll_prs.py --repo OWNER/REPO --sync --max 50
+python3 /Users/jason/Dev/tools/PR-Daemon/scripts/poll_prs.py --repo OWNER/REPO --sync --max 50
 ```
-Output: `total_open`, `sync` counts (inserted/updated/closed), and the review `queue`
-(new / head-changed only). The DB stores author + reviewer + status for every PR.
-The user may pass a repo via `/pr-daemon-loop OWNER/REPO` or extra instructions — honor them.
+Output: `total_open`, `sync` counts (inserted/updated/closed), and the review `queue`.
+The user may pass a repo via `/pr-daemon-loop OWNER/REPO` — honor it.
 
-After this, work the queue. To see the full picture any time: `$pr-daemon-status`.
-
-## Step 2 — Get & compress the diff
+## Step 2 — Get & compress the diff (Sonnet executor)
 
 ```bash
 gh pr diff N --repo OWNER/REPO > /tmp/pr-N.diff
-# compress large diffs to fit token budget (drops binary/lock/generated, ranks code first)
-python3 PR_DAEMON_ROOT/scripts/compress_diff.py --file /tmp/pr-N.diff --budget 80000 --stats > /tmp/pr-N-compressed.diff
+python3 /Users/jason/Dev/tools/PR-Daemon/scripts/compress_diff.py \
+  --file /tmp/pr-N.diff --budget 80000 --stats > /tmp/pr-N-compressed.diff
 ```
 
-## Step 3 — R1: DeepSeek does the heavy lifting
+> **Coverage transparency:** `--stats` prints dropped files. If any were dropped, add `Coverage: N files omitted (token budget)` to the review. For a dropped security-sensitive file, fetch it directly.
 
-DeepSeek (~$0.001/PR) produces ALL the mechanical work in one call: per-file summary,
-candidate findings, triage class, AND a draft comment skeleton. Claude works FROM this,
-not from scratch. Call DeepSeek directly with the R1 template (`config/review_templates.md`):
+## Step 2.5 — Issue / DoD compliance (issue-driven PRs)
+
+When a PR references an issue (title `(#N)`, body `关联/Closes/Refs #N`), verify the diff delivers what the issue asked.
 
 ```bash
-# DeepSeek R1 — pass the compressed diff, get FILES/FINDINGS/TRIAGE/SKELETON
-python3 PR_DAEMON_ROOT/scripts/deepseek_review.py \
-  --diff-file /tmp/pr-N-compressed.diff \
-  --repo OWNER/REPO --pr N --output /tmp/pr-N-r1.md
+# parse title + body for issue refs:
+gh pr view N --repo OWNER/REPO --json title,body -q '.title + "\n" + .body' \
+  | grep -oiE '(关联|实现|closes|fixes|resolves|refs)\s*:?\s*#[0-9]+|\(#[0-9]+\)' | grep -oE '#[0-9]+'
+gh issue view <ISSUE_N> --repo OWNER/REPO --json title,body
 ```
-(If `deepseek_review.py` is absent, fall back to `skills/pk-review/scripts/local_review.py`.)
 
-DeepSeek's output is the working base: `FILES`, `FINDINGS` (with severity+fix), `TRIAGE`
-(trivial/significant), `SKELETON` (4-line draft comment). **Do not re-read the diff in full
-afterward** — validate findings and spot-check only the hunks tied to high-sev/security items.
+Map each issue DoD item against the diff. Include in the review:
+```
+## Issue compliance (#N)
+- ✅ Met: <requirement → where in diff satisfies it>
+- ❌ Not met: <stated DoD item missing — grounds for REQUEST_CHANGES>
+- 🔍 Needs human verification: <not judgeable from code alone>
+```
+Skip this section entirely for trivial docs/chore PRs with no linked issue.
+
+## Step 3 — R1: DeepSeek dual-pass (parallel)
+
+Run both passes simultaneously. R1a is the full mechanical pass; R1b is a focused security lens.
+
+```bash
+# R1a — full review (full mechanical pass, same as v3)
+python3 /Users/jason/Dev/tools/PR-Daemon/scripts/deepseek_review.py \
+  --diff-file /tmp/pr-N-compressed.diff \
+  --repo OWNER/REPO --pr N --output /tmp/pr-N-r1a.md
+
+# R1b — security-only pass (different system prompt, same diff)
+python3 /Users/jason/Dev/tools/PR-Daemon/scripts/deepseek_review.py \
+  --diff-file /tmp/pr-N-compressed.diff \
+  --repo OWNER/REPO --pr N --output /tmp/pr-N-r1b.md \
+  --mode security
+```
+
+If `--mode security` is not yet implemented in `deepseek_review.py`, call DeepSeek directly:
+```bash
+# Inline R1b security pass (fallback)
+python3 - <<'EOF'
+import sys, json, os, requests
+diff = open("/tmp/pr-N-compressed.diff").read()
+payload = {
+  "model": "deepseek-reasoner",
+  "messages": [
+    {"role": "system", "content": (
+      "You are a security-focused code reviewer. Examine ONLY security concerns: "
+      "auth bypass, missing access control, reentrancy, integer overflow, signature replay, "
+      "unvalidated input from untrusted sources, hardcoded secrets, insecure randomness, "
+      "payment/token flow correctness, permission escalation. "
+      "Output: SECURITY_FINDINGS (id, severity, file:line, issue, fix) or NONE."
+    )},
+    {"role": "user", "content": f"DIFF:\n{diff}"}
+  ],
+  "max_tokens": 4000
+}
+r = requests.post(
+  os.environ["PR_DAEMON_FIRST_PASS_BASE_URL"].replace("/anthropic","") + "/chat/completions",
+  headers={"Authorization": f"Bearer {os.environ['PR_DAEMON_FIRST_PASS_API_KEY']}"},
+  json=payload
+)
+print(r.json()["choices"][0]["message"]["content"])
+EOF
+```
+
+**Sonnet merges R1a + R1b (executor role):**
+- Deduplicate overlapping findings (keep the higher-severity label)
+- Format a compact working list: `[Sev] file:line — issue | fix` per finding
+- Preserve R1b security findings even if they overlap R1a (security gets double weight)
+- Save to `/tmp/pr-N-r1-merged.md`
 
 ## Step 4 — Triage confirm: 2-round or 4-round?
 
-YOU (Sonnet) confirm the class. **Criteria (see DESIGN.md §4):**
+**YOU (Sonnet as executor) confirm the class:**
 
 **2-round (low risk) — needs ALL:**
 - type is docs / chore / style / typo / comments / formatting
@@ -117,7 +194,7 @@ YOU (Sonnet) confirm the class. **Criteria (see DESIGN.md §4):**
 - NO new public API / schema / migration
 
 **4-round (high risk) — ANY triggers it:**
-- type is feat (new feature) / major refactor
+- type is feat / major refactor
 - touches core code: `src/` `contracts/` `lib/` real logic
 - 🔴 **security-sensitive (HARD rule)**: `.sol` / auth / crypto / payment / token / permission / access-control
 - concurrency / state machine / data persistence / DB migration
@@ -125,80 +202,168 @@ YOU (Sonnet) confirm the class. **Criteria (see DESIGN.md §4):**
 - deletes tests / disables security checks / cross-module sweep
 
 **Safety bias:**
-- 🔴 security-sensitive hard rule → force 4-round, DO NOT accept DeepSeek downgrade
-- uncertain (can't tell if it's significant) → escalate to 4-round (over-review beats under-review)
-- confirmed low risk → 2-round
+- 🔴 security-sensitive → force 4-round, DO NOT accept DeepSeek downgrade
+- uncertain → escalate to 4-round (over-review beats under-review)
 
-Record the decision:
+Record:
 ```bash
-python3 PR_DAEMON_ROOT/scripts/triage_db.py record \
+python3 /Users/jason/Dev/tools/PR-Daemon/scripts/triage_db.py record \
   --repo OWNER/REPO --pr N --head-oid HEAD \
-  --rounds 2 --rationale "docs-only chore, no src touch" --signals "type:docs,no-core-code"
+  --rounds 2 --rationale "..." --signals "..."
 ```
 
 ## Step 5a — 2-round path (low risk)
 
-You (Sonnet) directly review the diff, fold in DeepSeek's valid findings, and decide the verdict.
-No Codex, no Opus. Go to Step 6.
+**Sonnet (executor role) reviews and decides directly.** Fold in valid R1a/R1b findings. No Opus, no Codex.
+
+This is the one place where Sonnet makes a judgment call — and only for truly low-risk PRs where the stakes are low enough that Sonnet's verdict is acceptable.
+
+Go to Step 6.
 
 ## Step 5b — 4-round path (high risk)
 
-**R2 — Sonnet challenge (deltas only):** work FROM DeepSeek's FINDINGS, don't re-derive.
-Spot-check only high-sev/security hunks. Output compactly: `CONFIRM <ids>` / `REJECT <id — why>` /
-`ADD <[Sev] file:line — issue | fix>`. (Template: R2 in `config/review_templates.md`.)
+### R2 — Opus independent strategic review
 
-**R3 — Codex PK (MANDATORY for 4-round):** pass the diff + R2 finding list **inline** so Codex
-does NOT re-fetch. Use `codex:codex-rescue`:
+Opus reads the diff **independently** — it forms its own view before seeing R1. Then it evaluates R1 findings as additional input.
+
+```
+Agent(subagent_type="general-purpose", model="opus", prompt="""
+You are R2 strategic reviewer for OWNER/REPO#N. Two-phase approach:
+
+PHASE 1 — Read the diff independently (below). Form your own list of findings before looking at R1.
+Focus on: cross-file consistency, state machine correctness, security patterns, missing error handling,
+off-by-one, race conditions, API contract violations, missing tests for changed behavior.
+
+PHASE 2 — Evaluate R1 findings:
+R1 MERGED FINDINGS:
+<paste /tmp/pr-N-r1-merged.md>
+
+Per R1 finding: CONFIRM id | REJECT id — reason ≤15 words | ADD [Sev] file:line — issue | fix
+
+Output ONLY this template:
+R2_INDEPENDENT: <[Sev] file:line — issue> (findings you found BEFORE reading R1; "NONE" if none)
+R2_CONFIRM: <ids from R1>
+R2_REJECT: <id — reason>
+R2_ADD: <[Sev] file:line — issue | fix>
+R2_STRATEGIC: <≤3 bullets on cross-file/architectural concerns not capturable as file:line>
+R2_TRIAGE_CONFIRM: 2-round | 4-round | ESCALATE (challenge Sonnet's triage if wrong)
+
+Do NOT produce a verdict. Do NOT post to GitHub.
+
+COMPRESSED DIFF:
+<paste /tmp/pr-N-compressed.diff>
+""")
+```
+
+Save Opus R2 output to `/tmp/pr-N-r2.md`.
+
+**Post-R2 severity gate:**
+```
+if R2 output contains ANY Medium+ finding (CONFIRM or ADD):
+    → run R3 Codex (targeted) + R4 Opus final
+else (all Low / suggestions only):
+    → SKIP Codex entirely
+    → run R4 Opus final directly (with full diff + missed scan)
+    → note in report: "Codex skipped — post-R2 all Low"
+```
+
+---
+
+### R3 — Codex PK (Medium+ findings only, targeted hunks)
+
+Codex challenges Opus R2's Medium+ findings (not R1 findings directly).
+
+**Extract targeted hunks first (Sonnet executor):** for each Opus-confirmed/added Medium+ finding at `file:line`, extract ±20 lines from the compressed diff. One `HUNK <id>:` block per finding.
+
 ```
 Agent(subagent_type="codex:codex-rescue", prompt="""
-PK CHALLENGE OWNER/REPO#N. Diff and findings are below — do NOT run gh pr diff.
-Per finding return ONE: [CHALLENGE|CONFIRM|MISSED] id — reason <=20 words.
-DIFF:
-<paste compressed diff>
-FINDINGS (post-R2):
-<compact list>
+PK CHALLENGE OWNER/REPO#N. Challenge the Opus R2 findings below.
+Do NOT fetch the full diff — only relevant hunks are provided.
+Per finding: [CHALLENGE|CONFIRM|MISSED] id — reason ≤15 words.
+
+OPUS R2 FINDINGS (Medium+ only):
+F1 [Medium] file.ts:42 — description
+F2 [High] other.sol:88 — description
+
+HUNK F1 (file.ts ~line 42, ±20 lines):
+<paste hunk>
+
+HUNK F2 (other.sol ~line 88, ±20 lines):
+<paste hunk>
+
 Return ONLY the structured critique. Do not post to GitHub.
 """)
 ```
-If Codex quota is exhausted → it auto-falls-back to Tier-3; or Sonnet self-challenges once. Note which.
 
-**Final verdict — Opus subagent (fixed template, no essay):** pass COMPACT round summaries, not
-full re-explanations. Demand the fixed template:
+If Codex quota exhausted → skip R3, add note, Opus R4 covers with full diff.
+
+---
+
+### R4 — Opus final verdict + missed-finding scan
+
+Second Opus call. Gets full diff + all round context. Two jobs in one call.
+
 ```
 Agent(subagent_type="general-purpose", model="opus", prompt="""
-Final authority on OWNER/REPO#N. Decide from these compact rounds. Respect Codex point-by-point
-(no dismissal without concrete counter-evidence). Output ONLY this template, no prose:
+Final authority on OWNER/REPO#N.
+
+Job 1: Decide the verdict using all round inputs below.
+Job 2: Scan the full diff for anything all prior rounds missed (cross-file, subtle logic, security patterns not visible from individual hunks).
+
+Respect Codex point-by-point — no dismissal without concrete counter-evidence.
+Output ONLY this template, no prose:
+
 VERDICT: APPROVE | REQUEST_CHANGES
 BLOCKING: <[Sev] file:line — issue | fix>   (empty if APPROVE)
 CONFIRMED: <[Sev] file:line — issue | fix>
 REJECTED: <finding — reason>
-SUGGESTIONS: <=3 bullets, optional
-ROUNDS — R1(DeepSeek): <...>  R2(Sonnet): <...>  R3(Codex): <...>
+MISSED: <[Sev] file:line — issue found in full-diff scan>  (empty if none)
+SUGGESTIONS: ≤3 bullets, optional
+ROUNDS:
+  R1a(DeepSeek-full): <compact summary>
+  R1b(DeepSeek-sec): <compact summary>
+  R2(Opus-strategic): <compact summary>
+  R3(Codex-PK): <compact summary, or "SKIPPED — post-R2 all Low">
+
+FULL DIFF (compressed):
+<paste /tmp/pr-N-compressed.diff>
+
+ROUND SUMMARIES:
+R1a: <merged findings compact>
+R1b: <security findings compact>
+R2: <paste /tmp/pr-N-r2.md>
+R3: <Codex output compact, or "SKIPPED">
 """)
 ```
 
-## Step 6 — Post the verdict
+## Step 6 — Post the verdict (Sonnet executor)
 
 Verdict MUST be **APPROVE** or **REQUEST_CHANGES** — never COMMENT limbo.
-- REQUEST_CHANGES: include challenging, specific objections (problem + trigger scenario + fix).
-- APPROVE: may still append enhancement / polish suggestions.
+- REQUEST_CHANGES: specific objections (problem + trigger scenario + fix). Cap to top ~5 by severity.
+- APPROVE: may append enhancement / polish suggestions.
+- High-impact / low-confidence item (data loss, security, fund-at-risk) → report with explicit uncertainty note. Never pad with low-value nits.
+- If an issue is linked, include the `## Issue compliance (#N)` section.
 
 ```bash
-bash PR_DAEMON_ROOT/scripts/post_pr_review.sh \
+bash /Users/jason/Dev/tools/PR-Daemon/scripts/post_pr_review.sh \
   --repo OWNER/REPO --pr N --body-file /tmp/review-N.md \
   --request-changes   # or --approve
-gh api user -q .login   # verify restored to main account
 ```
-Always use `post_pr_review.sh` (account switch). Never `gh pr review` directly.
+Always use `post_pr_review.sh` (PAT mode, no account switching). Never `gh pr review` directly.
 
-## Step 7 — Score DeepSeek + record
+## Step 7 — Score + record
 
 ```bash
-# score DeepSeek's R1 work for the improvement loop
-python3 PR_DAEMON_ROOT/scripts/model_eval_db.py record-run \
+# Score DeepSeek R1a+R1b for the improvement loop
+# --useful-findings: count confirmed by Opus R2
+# --false-positives: count rejected by Opus R2
+# --misses: count R1b security findings NOT in R1a (unique security coverage)
+python3 /Users/jason/Dev/tools/PR-Daemon/scripts/model_eval_db.py record-run \
   --owner OWNER --repo REPO --pr-number N --head-oid HEAD \
   --score SCORE --verdict VERDICT \
-  --useful-findings "..." --false-positives "..." --misses "..."
+  --useful-findings "R1a:N/M confirmed; R1b added K unique security findings" \
+  --false-positives "R1a: X rejected by Opus R2" \
+  --misses "Opus R2 independent found Y new; Codex missed Z"
 
 # update watcher state
 sqlite3 "$PR_DAEMON_STATE_DIR/pr-watch.sqlite" \
@@ -206,53 +371,162 @@ sqlite3 "$PR_DAEMON_STATE_DIR/pr-watch.sqlite" \
    last_reviewed_at=CURRENT_TIMESTAMP, review_decision='VERDICT' WHERE repo='OWNER/REPO' AND pr_number=N;"
 
 # token cost
-python3 PR_DAEMON_ROOT/scripts/token_cost.py --add INPUT_TOKENS OUTPUT_TOKENS
+python3 /Users/jason/Dev/tools/PR-Daemon/scripts/token_cost.py --add INPUT_TOKENS OUTPUT_TOKENS
 ```
 
-## Step 8 — Per-PR report + loop
+## Step 8 — Per-PR report + loop + v4 eval delta
 
 Print after every PR:
 ```
-📊 OWNER/REPO#N  VERDICT  [Nround]  PK: <summary>
+📊 OWNER/REPO#N  VERDICT  [Nround]  v4-pipeline
+   R1a: M/T confirmed (T total, M useful, X false-pos)
+   R1b: K unique security findings (N confirmed by Opus)
+   R2(Opus): Y independent findings, Z R1 rejected
+   R3(Codex): [ran|skipped] — W challenges
+   R4(Opus): final verdict
 📊 PR status: open N, reviewed M [changes: X, approve: Y]
 💰 this PR ~Nk tok | cumulative $X.XX
 ```
 Then next PR. When queue empty: re-poll; if nothing new, `sleep 300` and re-scan.
 
+### ⛔ Chat-output discipline (HARD — user repeatedly enforced)
+
+The **full** review (verified table / findings / rounds / suggestions) goes **ONLY into the PR comment body** via `post_pr_review.sh`. The **chat reply** is terse:
+
+> 审完了。OWNER/REPO#N ✅ APPROVE — [关键点1]；[关键点2]；[关键点3]。细节已在 PR comment 里。
+
+- Give **2-3 load-bearing key points** (what real value you verified, what you caught, whether a negative-path/invariant holds) — **精准点评, not zero**. One line each, no sections.
+- **NEVER** in chat: bullet/`###` sections, a "verified/findings/rounds" breakdown, restating what the PR changed, or re-explaining why it's correct. All of that lives in the PR comment only.
+- 2-round docs/chore → usually a one-line verdict + "详情见 PR comment", 0-1 key point.
+- REQUEST_CHANGES / decision needed → add one line for the blocker/decision.
+- The verbose `📊` block above is internal bookkeeping — do NOT dump it to chat verbatim.
+- Self-check: if your chat reply has sections or restates technical detail → delete, compress to "结论 + 几条精准点 + 见 comment".
+
+### ⛔ Never merge unless explicitly told (HARD)
+
+Words like "合 / ready / CI 会绿" in a message are **NOT** merge authorization. APPROVE is the endpoint; **ask before merging** unless the user explicitly says "你来合 / merge it / 你给合了". Security-critical PRs (recovery / owner-change / payment / permissions) → confirm even then.
+
+### ⛔ No fake rounds — the label MUST match what actually ran (HARD — user reprimanded)
+
+**Never tag a review `[N-round]` for a round count you did not actually execute.** Doing solo-Opus and labeling it `[4-round]` is fabrication. The round count in the verdict = the number of rounds whose tool calls actually happened in the transcript.
+
+- **2-round** = DeepSeek R1 ran + Opus verdict. Allowed ONLY for docs/chore/comment/version-bump with no `src/`/contract/auth/crypto/payment touch.
+- **4-round** = DeepSeek R1 (R1a+R1b) **actually called** → Opus R2 → **Codex R3 actually called** → Opus R4 verdict. REQUIRED for any security-sensitive PR (auth/crypto/payment/permission/.sol/.rs signing/challenge-binding/address-derivation). If you did not run DeepSeek and Codex, you may NOT write `[4-round]`.
+- If a model genuinely can't run (e.g. Codex API 529), say so explicitly in the verdict and downgrade the label to what ran (e.g. `[3-round, Codex unavailable]`) — never claim it.
+
+### Credibility = mechanical evidence, not model count (HARD)
+
+For security-sensitive PRs, **run the tooling — don't reason from reading**. Default to:
+- `forge inspect` / `forge test` / `cast call` / `cast sig` (keccak selectors) / on-chain `eth_call` decode — verify claims against ground truth.
+- Read BOTH sides of any cross-layer contract (e.g. SDK encoder ↔ on-chain verifier; host ↔ TA) and map every case — don't trust a grep snippet.
+- A review that says "I ran X, result Y" is worth more than three models reasoning. Prefer adding verifiable evidence over adding model passes.
+- 🔴🔴 **CROSS-LAYER IMPACT ANALYSIS IS THE REVIEW — not the changed lines.** A change to one layer is only safe if every COUPLED layer that must stay consistent was changed in lockstep. Reviewing only the diff'd file is not a review. For EVERY PR, before any verdict, explicitly enumerate the coupled layers and CHECK each one (open the file, don't assume):
+  - **CA(host) ↔ TA**: the recurring #110/#113/#121 bug class. If the **TA** changes an op's challenge binding (None↔Some / payload / tag), the **host** `resolve_passkey_assertion` `delegate_challenge_to_ta` for that EXACT op MUST flip to match — else the host rejects the committed challenge before it reaches the TA (`webauthn.rs` "challenge mismatch") and strict is unreachable. And vice-versa: if the host changes delegate, the TA's Some/None must match. **When you see a TA binding change, your FIRST action is to grep the host delegate call site for that op.** (I violated this on #121: reviewed the TA `mint_label_digest` in isolation, APPROVED, and missed that the host still passed `delegate=false` → strict mint dead. The user's Codex caught it. Inexcusable — I had verified this exact invariant in #113/#114/#116 the same session.)
+  - **SDK ↔ TA ↔ on-chain contract**: any digest/commitment must match across all three (the #137 grant-packing class).
+  - **proto wire change** → host + TA co-deploy; partial deploy + bincode trailing bytes = silently-ignored new fields.
+  - **An op's commitment must bind the OPERATION/ENDPOINT itself** — two ops that can produce the same commitment (e.g. empty-label `create` vs `refresh`, same tag) are cross-replayable: the user's signature is over the commitment, so command-dispatch separation does NOT prevent replaying one op's assertion into another. The endpoint/op must be in the digest (distinct tag).
+  - **Feed Codex BOTH sides of every coupling** (TA binding AND host delegate; SDK AND contract). If you only paste the changed side, Codex is blind to the inconsistency too — that's how my #121 Codex pass also missed the host delegate.
+- 🔴 **For commitment / signature schemes, byte-matching the digest is NOT enough — verify BOTH parties can actually OBTAIN every bound input at the moment they must compute it.** A commitment over a field the client can't know (server-assigned id, host-derived value) is *unsatisfiable* under strict mode even if the SDK and TA hash it identically. (Proven: I approved AirAccount#118 + aastar-sdk#138 mint-param binding — verified the digest matched byte-for-byte — but missed that `index`/`ttl`/`subject` are server-derived, so the client ceremony can't compute the commitment → strict mint would break. Reverted in AirAccount#120.) Ask: "at ceremony time, does the committing side already hold every committed field?" If not, the scheme is broken regardless of byte-parity.
+
+### Feed full context to DeepSeek and Codex (HARD — their errors are context-starvation)
+
+DeepSeek's false positives and Codex's "INSUFFICIENT_CONTEXT / can't fetch" are almost always missing-context, not model weakness. So:
+- **DeepSeek R1**: pass the compressed diff **plus the relevant contract/source snippets** the finding depends on (e.g. the EIP-712 typehash, the storage layout, the verifier function) inline in the prompt. Don't make it guess the upstream shape.
+- **Codex R3 (PK)**: pass the diff + the post-R2 findings + **the cross-layer source it must check** (e.g. both the SDK encoder and the on-chain/TA verifier, the op→flag mapping) inline. NEVER rely on Codex fetching the diff itself. Give it a concrete claim to refute and the evidence to refute it with.
+  - 🔴 **Paste source VERBATIM — never hand-summarize a struct / domain / signature / type when feeding Codex.** Copy the exact lines from the file. If you retype or "simplify" a definition you WILL drop a field, and Codex will report a guaranteed false positive on the field you elided. (Proven: aastar-sdk#137 — I summarized an EIP-712 domain without its `chainId`; Codex immediately raised a bogus `[High]` cross-chain-replay finding. The field was in the actual code.) Whenever Codex flags a missing field/check, FIRST re-grep the real source before believing it — the omission is usually in your prompt, not the code.
+
+## v4 vs v3 Evaluation
+
+After every 5 PRs (or on demand), compare v4 vs v3 pipeline quality:
+
+**Metrics to track in model_eval_db:**
+| Metric | v3 baseline | v4 target | How to measure |
+|--------|-------------|-----------|----------------|
+| DeepSeek R1 false-positive rate | ~60% (this session) | < 40% | R1 rejected by Opus R2 / R1 total |
+| Unique security findings from R1b | 0 (no R1b in v3) | > 0 per security PR | count R1b-only confirmed findings |
+| Opus R2 independent findings | 0 (no Opus R2 in v3) | > 0 on non-trivial PRs | count R2_INDEPENDENT non-empty |
+| Codex challenge rate | ~20% of findings | stable | Codex CHALLENGE / total Codex input |
+| Final verdict quality | subjective | fewer RC-to-APPROVE flips | track post-review author feedback |
+
+**Run after 10+ v4 PRs:**
+```bash
+python3 /Users/jason/Dev/tools/PR-Daemon/scripts/model_eval_db.py provider-summary --limit 50
+# Filter by date > v4 launch (2026-06-19) to isolate v4 results
+```
+
+**Rollback trigger:** if DeepSeek false-positive rate doesn't improve after 10 PRs, OR Opus R2 costs make the loop prohibitive, revert:
+```bash
+cp ~/.claude/skills/pr-daemon-loop/SKILL.md.bak-v3-20260619 ~/.claude/skills/pr-daemon-loop/SKILL.md
+```
+
 ## Triage validation (run periodically)
 
 ```bash
-# audit a past 2-round PR by running full 4-round retroactively
-python3 PR_DAEMON_ROOT/scripts/triage_db.py audit --repo OWNER/REPO --pr N --found-issue true|false
-# if a 2-round APPROVE later gets human RC / bug:
-python3 PR_DAEMON_ROOT/scripts/triage_db.py flag-miss --repo OWNER/REPO --pr N --note "..."
-# check effectiveness (target false-negative < 5%)
-python3 PR_DAEMON_ROOT/scripts/triage_db.py report
+python3 /Users/jason/Dev/tools/PR-Daemon/scripts/triage_db.py audit --repo OWNER/REPO --pr N --found-issue true|false
+python3 /Users/jason/Dev/tools/PR-Daemon/scripts/triage_db.py flag-miss --repo OWNER/REPO --pr N --note "..."
+python3 /Users/jason/Dev/tools/PR-Daemon/scripts/triage_db.py report
+# Target: false-negative < 5%
 ```
-If false-negative rate ≥ 5% → tighten 2-round criteria, push more PRs to 4-round.
 
 ## Mandatory Per-PR Checklist
 
 ```
 [ ] poll_prs.py surfaced this PR (new/head-changed, in-scope org)
-[ ] compressed the diff if large
-[ ] R1: DeepSeek initial review + triage proposal
-[ ] confirmed 2/4-round (security hard-rule → force 4; uncertain → escalate)
+[ ] compressed the diff → /tmp/pr-N-compressed.diff (noted dropped files if any)
+[ ] if issue linked: fetched issue DoD + drafted Issue compliance section
+[ ] R1a: DeepSeek full review → /tmp/pr-N-r1a.md
+[ ] R1b: DeepSeek security-only → /tmp/pr-N-r1b.md  (parallel with R1a)
+[ ] Sonnet merged R1a+R1b → /tmp/pr-N-r1-merged.md (deduplicated)
+[ ] confirmed 2/4-round triage (security hard-rule → force 4; uncertain → escalate)
 [ ] recorded triage decision (triage_db.py)
-[ ] 4-round: ran R2 Sonnet challenge + R3 Codex PK + Opus verdict
+[ ] 2-round: Sonnet verdict directly
+[ ] 4-round: Opus R2 read diff independently + challenged R1 → /tmp/pr-N-r2.md
+[ ] 4-round: post-R2 gate applied (Medium+ → Codex R3; all-Low → skip)
+[ ] 4-round: if Codex ran → targeted hunks only (±20 lines per Opus-confirmed Medium+)
+[ ] 4-round: Opus R4 got full compressed diff + all round context → final verdict
 [ ] verdict is APPROVE or REQUEST_CHANGES (not COMMENT)
-[ ] respected Codex's points one by one
-[ ] posted via post_pr_review.sh, verified account restored
-[ ] scored DeepSeek (model_eval_db) + updated pr_watch_targets
-[ ] printed per-PR report (status counter + token cost)
+[ ] respected Codex's points one by one (if Codex ran)
+[ ] posted via post_pr_review.sh (PAT, no account switching)
+[ ] scored DeepSeek R1a+R1b separately in model_eval_db
+[ ] printed per-PR v4 eval delta (R1 confirmation rate, Opus R2 independent findings)
+[ ] updated pr_watch_targets in SQLite
 ```
 
 ## Hard Rules
 
-- **NEVER MERGE.** `gh pr merge` forbidden.
-- **Final verdict is Claude Code's**, but respect DeepSeek + Codex (especially Codex) feedback.
+- **NEVER MERGE.** Pure reviewer — APPROVE or REQUEST_CHANGES only. `$pr-fix` handles merging.
+- **Sonnet is executor only** — no judgment on 4-round PRs. Sonnet formats, runs scripts, merges lists.
+- **Opus makes the 4-round final call** — Sonnet does NOT override or second-guess Opus's verdict.
+- **Codex PK targets Opus R2 findings** (not DeepSeek R1 findings) — challenge the best analysis.
 - **Security-sensitive PRs always go 4-round** — no downgrade.
 - **Never COMMENT-limbo** — always APPROVE or REQUEST_CHANGES.
 - **Never `gh pr review` directly** — always `post_pr_review.sh`.
 - **3 orgs only** — never personal PRs.
-- **Always score DeepSeek + record triage** for the improvement & validation loops.
+- **Always score R1a+R1b separately** — the dual-pass split is the key v4 innovation to measure.
+- **Codex gets targeted hunks, NOT full diff** — ±20 lines per Opus-confirmed Medium+ finding.
+- **Opus R4 always gets full compressed diff** — missed-finding scan requires full context.
+- **Post-R2 all-Low → skip Codex** — Opus R4 covers with full diff sweep.
+- **Track v4 vs v3 metrics** every 5 PRs — if no improvement, rollback.
+
+## ⛔ Mandatory self-assessment — END every review with this (HARD — user reprimanded)
+
+After posting the verdict for a PR, the **chat reply** must close with a compact self-assessment block. This is non-negotiable and exists because the reviewer repeatedly mislabeled solo-Opus reviews as multi-round.
+
+```
+🔎 自评 — OWNER/REPO#N
+- 轮数: <实际跑了几轮>  (skill 要求: <triage 要求几轮>)  → 一致? ✅/❌
+- 每轮每模型实际做了什么:
+  · R1 DeepSeek: <ran? 喂了什么 context? 产出/被驳了什么>  | 或 "未跑 — 原因"
+  · R2 Opus: <读了什么/跑了什么工具(forge/cast/eth_call)/cross-layer 验了什么>
+  · R3 Codex: <ran? 喂了什么 context inline? CHALLENGE/CONFIRM>  | 或 "未跑 — 原因(如 529)"
+  · R4 Opus 裁决: <verdict>
+- 机械证据: <列实跑的工具命令 + 结果，如 "cast call gToken()→canonical ✓">  | 或 "无 — 应补"
+- 与 skill 设计是否一致: <一致 / 偏差点>
+- 改进建议: <若我偷工 → 怎么补; 若 skill 本身该改 → 具体改什么>
+```
+
+Rules for the self-assessment:
+- **Be truthful about gaps.** If you skipped a round or a tool you should have run, say so here and either run it now or flag it — do NOT paper over it.
+- If the round count or model usage **deviated from what the triage required**, the self-assessment must state the deviation AND the corrective action (run it now / re-review).
+- If the deviation reveals a **skill-process problem** (e.g. a step that's unrealistic, or context that should be auto-fed), include a concrete **skill-improvement recommendation** here, and offer to edit the skill.
+- This block is part of the terse chat reply [[feedback_terse_chat_output]] — keep it compact, but it is the one place where listing per-round/per-model detail is REQUIRED (not "see PR comment").
