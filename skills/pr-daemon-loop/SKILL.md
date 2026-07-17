@@ -351,6 +351,34 @@ bash /Users/jason/Dev/tools/PR-Daemon/scripts/post_pr_review.sh \
 ```
 Always use `post_pr_review.sh` (PAT mode, no account switching). Never `gh pr review` directly.
 
+## Step 6.5 — Sync verdict to goutou bus (只对 REQUEST_CHANGES + 已注册仓库)
+
+> 目的：把「需要修改」的结论路由回**原仓库自己的 `/goutou` 工兵**去修（原仓库有全上下文，且覆盖任意作者）。
+> 规范见 `~/Dev/jhfnetboy/goutou/docs/goutou/PR-REVIEW.md`。前置：`.goutou.json` 存在、Seeder MCP 可用。
+
+**触发判断（不满足则跳过本步，直接 Step 7）**：
+
+1. 读 `.goutou.json` 拿 `coordProjectId` 与 `goutouDepsPath`。缺文件 → 跳过（未接入 goutou）。
+2. 把 `OWNER/REPO` 用 `goutouDepsPath`（`repos.<id>.github`）反查成 `originRepoId`。查不到 → 跳过（非生态仓库）。
+3. bot PR（dependabot/renovate 作者）→ 跳过（走 pr-fix 内部闭环，不进总线）。
+
+**幂等 upsert（靠 description 里的 `pr:OWNER/REPO#N` token 定位）**：
+
+先 `mcp__seeder__search("pr:OWNER/REPO#N")` 或 `list-tasks(labelName="pr-review")` 找已存在的任务。
+
+- **verdict == REQUEST_CHANGES**：
+  1. 无任务 → `create-task`：
+     - title = `[PR] OWNER/REPO#N: <PR标题截断>`
+     - description = `pr:OWNER/REPO#N repo:<originRepoId> from:pr-daemon` + 换行 + PR URL / Head / Verdict / Author / Updated
+  2. 确保标签存在（`list-task-labels` → 缺则 `create-task-label`）并挂上：`pr-review`(#ef8b3a) + `repo:pr-daemon` + `repo:<originRepoId>`
+  3. `add-task-comment`：`[pr-daemon] REVIEW REQUEST_CHANGES @<sha8>` + top~5 blocking findings（`[Sev] file:line — 问题 | 建议`）
+  4. 已有任务 → 更新 description 的 Head/Verdict/Updated，重新挂 `repo:<originRepoId>`（若上轮 approve 摘过），追加新 findings 评论
+- **verdict == APPROVE**：
+  1. 无任务 → 跳过（首轮就过，没啥要协同）
+  2. 有任务（之前 RC 过）→ `list-task-statuses` 找 `isTerminal=true` 的 statusId → `update-task` 移到 Done（其余字段保持原值）+ `add-task-comment`：`[pr-daemon] REVIEW ✅ APPROVED @<sha8>，原仓库可自行 merge`
+
+> 全部通过 `mcp__seeder__*` 调用（MCP 与 DeepSeek endpoint 无关，照常可用）。任一 MCP 调用失败 → 记一行 warning，不阻塞 Step 7（review 结论已发到 GitHub，是权威）。
+
 ## Step 7 — Score + record
 
 ```bash

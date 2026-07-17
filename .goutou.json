@@ -1,0 +1,7 @@
+{
+  "_comment": "pr-daemon 接入 goutou 协同总线。作为 PR-review 引擎，把 REQUEST_CHANGES 结论路由回原仓库工兵。见 ~/Dev/jhfnetboy/goutou/docs/goutou/PR-REVIEW.md",
+  "repoId": "pr-daemon",
+  "coordProjectId": "03253073-c822-4a5a-b169-cb39976200c3",
+  "seederUrl": "http://localhost:7399",
+  "goutouDepsPath": "~/Dev/jhfnetboy/goutou/.goutou-deps.json"
+}

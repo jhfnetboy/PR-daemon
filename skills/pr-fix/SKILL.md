@@ -194,6 +194,18 @@ Output icons:
 
 **Queue priority:** 🔴 first → 🤖 second → 🟡 last
 
+### Step 1a — 去冲突：跳过 goutou 已路由的 human PR（HARD）
+
+> goutou 协同系统会把 goutou 已注册仓库里被 RC 的 PR 路由回**原仓库自己的 `/goutou` 工兵**去修（原仓库有全上下文）。这类 PR 不该由 pr-fix 在克隆目录里盲修，否则和原仓库工兵撞车。规范见 `~/Dev/jhfnetboy/goutou/docs/goutou/PR-REVIEW.md` §6。
+
+对每个 🔴/🟡 human PR（`OWNER/REPO#N`）：
+
+1. 读 `.goutou.json`（缺文件 → 未接入 goutou，跳过本检查，正常处理）。
+2. 用 `goutouDepsPath`（`repos.<id>.github`）把 `OWNER/REPO` 反查 `repoId`。查不到 → **非 goutou 仓库，pr-fix 正常处理**。
+3. 查到 `repoId` 且 Seeder 里存在该 PR 的 `pr:OWNER/REPO#N` 任务 → 标记 `SKIP（goutou-routed → repo:<repoId>）`，**不处理**，在报告里列出让用户知道谁在负责。
+
+**bot PR（🤖）不受此规则影响**——始终走 pr-fix 内部闭环（bot 无法响应 `/goutou`）。
+
 ## Step 1b — Bot PR path (🤖 PRs, separate from human PR flow)
 
 Bot PRs (dependabot / renovate) cannot push new commits — they follow a different path:
