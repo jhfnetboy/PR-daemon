@@ -135,7 +135,7 @@ def build_parser():
     rec.add_argument("--repo", required=True)
     rec.add_argument("--pr", type=int, required=True)
     rec.add_argument("--head-oid", default=None)
-    rec.add_argument("--rounds", type=int, choices=[2, 4], required=True)
+    rec.add_argument("--rounds", type=int, choices=[2, 3, 4, 5], required=True)
     rec.add_argument("--rationale", default="")
     rec.add_argument("--signals", default="")
     rec.set_defaults(func=cmd_record)

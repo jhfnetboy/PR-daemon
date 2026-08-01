@@ -166,13 +166,19 @@ def main():
     template = SECURITY_PROMPT if mode == "security" else PROMPT
     prompt = template.format(repo=repo, pr=pr, diff=diff)
 
-    body = json.dumps({
-        "model": "deepseek-chat",
+    import os
+    model = os.environ.get("PR_DAEMON_FIRST_PASS_MODEL") or "deepseek-v4-flash"
+    thinking_disabled = os.environ.get("PR_DAEMON_FIRST_PASS_THINKING", "disabled") == "disabled"
+    payload = {
+        "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.2,
-        "max_tokens": 3000,
+        "max_tokens": 6000,
         "frequency_penalty": 0.5,
-    }).encode()
+    }
+    if thinking_disabled:
+        payload["thinking"] = {"type": "disabled"}
+    body = json.dumps(payload).encode()
 
     t0 = time.time()
     req = Request("https://api.deepseek.com/chat/completions", data=body,

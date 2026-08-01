@@ -147,34 +147,7 @@ python3 /Users/jason/Dev/tools/PR-Daemon/scripts/deepseek_review.py \
   --mode security
 ```
 
-If `--mode security` is not yet implemented in `deepseek_review.py`, call DeepSeek directly:
-```bash
-# Inline R1b security pass (fallback)
-python3 - <<'EOF'
-import sys, json, os, requests
-diff = open("/tmp/pr-N-compressed.diff").read()
-payload = {
-  "model": "deepseek-reasoner",
-  "messages": [
-    {"role": "system", "content": (
-      "You are a security-focused code reviewer. Examine ONLY security concerns: "
-      "auth bypass, missing access control, reentrancy, integer overflow, signature replay, "
-      "unvalidated input from untrusted sources, hardcoded secrets, insecure randomness, "
-      "payment/token flow correctness, permission escalation. "
-      "Output: SECURITY_FINDINGS (id, severity, file:line, issue, fix) or NONE."
-    )},
-    {"role": "user", "content": f"DIFF:\n{diff}"}
-  ],
-  "max_tokens": 4000
-}
-r = requests.post(
-  os.environ["PR_DAEMON_FIRST_PASS_BASE_URL"].replace("/anthropic","") + "/chat/completions",
-  headers={"Authorization": f"Bearer {os.environ['PR_DAEMON_FIRST_PASS_API_KEY']}"},
-  json=payload
-)
-print(r.json()["choices"][0]["message"]["content"])
-EOF
-```
+Both R1a and R1b always go through `deepseek_review.py` (`--mode security` is implemented). Both calls resolve the model from `PR_DAEMON_FIRST_PASS_MODEL`, pinned to **`deepseek-v4-flash`** (non-thinking mode, `PR_DAEMON_FIRST_PASS_THINKING=disabled`) — do not call the DeepSeek API directly or hardcode any other model id (e.g. the deprecated `deepseek-chat` / `deepseek-reasoner` aliases).
 
 **Sonnet merges R1a + R1b (executor role):**
 - Deduplicate overlapping findings (keep the higher-severity label)

@@ -264,21 +264,26 @@ def upsert_pr(conn: sqlite3.Connection, pr: dict[str, object]) -> tuple[str, sql
 def build_prompt(row: sqlite3.Row) -> str:
     return textwrap.dedent(
         f"""
-        Use $pk-review to review {row['repo']}#{row['pr_number']} in PR-Daemon autonomous watch mode.
+        Use $pr-daemon-loop (the canonical v4 pipeline — do not substitute a different review flow)
+        to review {row['repo']}#{row['pr_number']} in PR-Daemon autonomous watch mode.
 
-        3-tier PK review process:
-        1. You (DeepSeek via Claude Code) are the primary reviewer. Read the diff and relevant files independently first.
-        2. Optionally run skills/pk-review/scripts/local_review.py for an additional breadth pass.
-        3. Invoke Codex as the PK challenger: codex exec with the finding list.
-        4. Own the final verdict and post the GitHub review as clestons.
-
-        Requirements:
+        Requirements (on top of everything pr-daemon-loop's own SKILL.md already mandates):
         - Use the local repository if available (see config/repo-roots.json); never clone to /tmp unless no local checkout exists.
         - Every review must end with a clear conclusion: APPROVE, REQUEST_CHANGES, or COMMENT.
         - Post the corresponding GitHub review/comment as clestons using scripts/post_pr_review.sh.
         - Never merge the PR, even after approval. Leave merge decisions to the PR author/maintainer.
         - Update PR-Daemon SQLite/Markdown records: reviews/, model_eval_db.py record-run.
+          Always pass --provider deepseek --model deepseek-v4-flash explicitly on record-run
+          (past runs were mostly logged with provider left blank -> "unknown" in provider-summary,
+          which makes flash-specific stats unqueryable — do not repeat that gap).
         - Do NOT modify business repo source, config, tests, or lock files.
+        - DeepSeek model is pinned to deepseek-v4-flash (PR_DAEMON_FIRST_PASS_MODEL) — do not override it.
+        - In the mandatory self-assessment block, add one explicit line rating DeepSeek v4-flash's
+          performance on THIS PR (1-5 + one sentence: did R1a/R1b surface anything Opus R2/Codex R3
+          later confirmed as real, any false positives, anything they caught that flash missed
+          entirely). This feeds an ongoing flash-vs-pro evaluation (target: 20 rounds, started
+          2026-08-01) — jason will aggregate via model_eval_db.py provider-summary once enough
+          rounds land, so just record honestly each time, no extra action needed here.
 
         PR metadata:
         - title: {row['title']}
@@ -415,7 +420,7 @@ def _build_claude_cmd(prompt_text: str, roots: list[str]) -> list[str]:
     reviewer_script = str(Path.cwd() / "run-dpsk-claude.sh")
     model = os.environ.get("PR_DAEMON_REVIEWER_MODEL", "opus")
     max_turns = os.environ.get("PR_DAEMON_REVIEWER_MAX_TURNS", "40")
-    skill_file = str(Path.cwd() / "skills/pk-review/SKILL.md")
+    skill_file = str(Path.cwd() / ".claude/skills/pr-daemon-loop/SKILL.md")
     cmd = [
         "bash",
         reviewer_script,

@@ -83,7 +83,11 @@ def gh_search_org_prs():
             except (subprocess.TimeoutExpired, json.JSONDecodeError):
                 pass
         if not got:
-            break
+            # First page failed after all retries → whole fetch is unreliable.
+            # Signal failure instead of returning a partial/empty list that
+            # sync_to_sqlite would misread as "no open PRs" and use to mark
+            # genuinely-open PRs as closed.
+            return None if _page == 0 else results
         search = got.get("data", {}).get("search", {})
         for n in search.get("nodes", []):
             if not n:
@@ -138,9 +142,16 @@ def get_current_head(repo, pr_number):
 
 
 def gh_list_repo_prs(repo, include_all_authors=False):
-    """List open PRs in one specific repo. Returns list of dicts shaped like gh search."""
+    """List open PRs in one specific repo. Returns list of dicts shaped like gh search.
+
+    Returns None (not []) if every retry failed — the caller MUST distinguish
+    "fetch failed" from "genuinely zero open PRs", otherwise a transient API
+    blip gets read as "repo has no open PRs" and sync_to_sqlite() marks every
+    tracked-open PR in that repo as closed (real incident: 2026-07-26, wiped
+    review state for several genuinely-open PRs after a `gh pr list` hiccup).
+    """
     cmd = ["gh", "pr", "list", "--repo", repo, "--state", "open",
-           "--json", "number,title,url,updatedAt,isDraft,author", "--limit", "100"]
+           "--json", "number,title,url,updatedAt,isDraft,author,headRefOid", "--limit", "100"]
     for _ in range(3):
         try:
             out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
@@ -153,15 +164,16 @@ def gh_list_repo_prs(repo, include_all_authors=False):
                     return [{
                         "number": p["number"], "title": p["title"], "url": p["url"],
                         "updatedAt": p["updatedAt"], "isDraft": p["isDraft"],
+                        "headRefOid": p.get("headRefOid"),
                         "author": p.get("author", {}),
                         "repository": {"nameWithOwner": repo},
                     } for p in raw]
         except (subprocess.TimeoutExpired, json.JSONDecodeError):
             pass
-    return []
+    return None
 
 
-def sync_to_sqlite(prs):
+def sync_to_sqlite(prs, scope_repo=None):
     """Upsert every open PR into pr_watch_targets — the live mirror of all open PRs.
 
     Stores author + reviewer + status. Marks PRs no longer open as 'closed'.
@@ -169,6 +181,16 @@ def sync_to_sqlite(prs):
     - already reviewed, head same  → keep status (approved/changes_requested)
     - already reviewed, head moved  → status='needs_review' (re-review)
     Returns (inserted, updated, closed) counts.
+
+    `scope_repo`: when this sync came from `--repo OWNER/REPO` (single-repo fetch),
+    `prs` only contains that one repo's PRs, so `seen_keys` is scoped to it too.
+    The "mark closed" step below MUST be scoped the same way — otherwise every
+    OTHER repo's currently-open PR (not in this call's `prs`) looks "not seen"
+    and gets wrongly marked closed. Looping `--repo` sync calls across repos
+    without this scope corrupts state on every iteration (real incident:
+    2026-07-26 — sequential single-repo syncs across 5 repos flip-flopped each
+    other's rows between open/closed). Pass None only for an org-wide sync that
+    genuinely covers every tracked repo in one call.
     """
     review_user = os.environ.get("PR_DAEMON_REVIEW_USER", "clestons")
     conn = sqlite3.connect(STATE_DB)
@@ -216,9 +238,17 @@ def sync_to_sqlite(prs):
                 (pr["title"], pr["url"], author, cur_head, is_draft, new_status, repo, num))
             updated += 1
 
-    # mark PRs that are tracked but no longer open as closed
+    # mark PRs that are tracked but no longer open as closed — scoped to the
+    # repo(s) this sync actually covered, never the whole table (see docstring)
     closed = 0
-    for r in conn.execute("SELECT repo, pr_number FROM pr_watch_targets WHERE state='open' OR state IS NULL").fetchall():
+    if scope_repo:
+        candidates = conn.execute(
+            "SELECT repo, pr_number FROM pr_watch_targets WHERE repo=? AND (state='open' OR state IS NULL)",
+            (scope_repo,)).fetchall()
+    else:
+        candidates = conn.execute(
+            "SELECT repo, pr_number FROM pr_watch_targets WHERE state='open' OR state IS NULL").fetchall()
+    for r in candidates:
         if (r[0], r[1]) not in seen_keys:
             conn.execute("UPDATE pr_watch_targets SET state='closed', status='closed' WHERE repo=? AND pr_number=?", r)
             closed += 1
@@ -274,11 +304,21 @@ def main():
     else:
         prs = gh_search_org_prs()
 
-    result = {"total_open": len(prs)}
+    fetch_failed = prs is None
+    if fetch_failed:
+        prs = []
+
+    result = {"total_open": len(prs), "fetch_failed": fetch_failed}
 
     if do_sync:
-        ins, upd, clo = sync_to_sqlite(prs)
-        result["sync"] = {"inserted": ins, "updated": upd, "closed": clo}
+        if fetch_failed:
+            # Do NOT sync on a failed fetch — an empty result here is not
+            # "zero open PRs", it's "we don't know". Syncing it would mark
+            # every genuinely-open PR in scope as closed.
+            result["sync"] = {"inserted": 0, "updated": 0, "closed": 0, "skipped": "fetch_failed"}
+        else:
+            ins, upd, clo = sync_to_sqlite(prs, scope_repo=target_repo)
+            result["sync"] = {"inserted": ins, "updated": upd, "closed": clo}
 
     queue = build_queue(prs, max_prs, since_secs)
     result["count"] = len(queue)
