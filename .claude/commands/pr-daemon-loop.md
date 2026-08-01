@@ -10,7 +10,7 @@ User arguments: $ARGUMENTS
 Interpret the arguments:
 - If an argument looks like `OWNER/REPO` → **single-repo mode**: review ALL open PRs in that
   one repo. Discover with `python3 scripts/poll_prs.py --repo OWNER/REPO`.
-- If no repo is given → **org-scan mode**: review the 3 orgs (AAStarCommunity, AuraAIHQ, MushroomDAO)
+- If no repo is given → **org-scan mode**: review the 3 orgs (AAStarCommunity, iDoris-ai, MushroomDAO)
   via `python3 scripts/poll_prs.py`.
 - Any remaining text is extra instructions (e.g. "only security review", "max 3 PRs", "skip drafts")
   — honor them on top of the skill's defaults.

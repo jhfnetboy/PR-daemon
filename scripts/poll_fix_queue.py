@@ -26,7 +26,8 @@ import sys, os, json, subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-ORGS = ["AAStarCommunity", "AuraAIHQ", "MushroomDAO"]
+# AuraAIHQ was renamed to iDoris-ai (old name now 404s -> "Invalid search query").
+ORGS = ["AAStarCommunity", "iDoris-ai", "MushroomDAO"]
 
 
 # ──────────────────────────────────────────────────────────────

@@ -24,7 +24,7 @@ origin: pr-daemon
 > Do NOT dismiss a Codex finding without concrete counter-evidence.
 >
 > ⛔ **ABSOLUTE CONSTRAINT #4 — 3 orgs only**
-> Only review PRs in `AAStarCommunity`, `AuraAIHQ`, `MushroomDAO`. Never review personal (jhfnetboy) PRs.
+> Only review PRs in `AAStarCommunity`, `iDoris-ai`, `MushroomDAO`. Never review personal (jhfnetboy) PRs.
 >
 > ⛔ **ABSOLUTE CONSTRAINT #5 — DeepSeek R1a is NEVER optional (added 2026-08-01, user reprimanded)**
 > Run R1a (`deepseek_review.py`, model pinned to `deepseek-v4-flash`) on **every single review round**,

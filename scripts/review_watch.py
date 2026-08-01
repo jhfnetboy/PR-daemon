@@ -549,7 +549,14 @@ def should_refresh(conn: sqlite3.Connection, refresh_interval: int) -> bool:
 def refresh_from_remote(conn: sqlite3.Connection, args: argparse.Namespace, scopes: list[str]) -> int:
     seen = 0
     for scope in scopes:
-        for item in search_scope(scope, args.limit_per_scope):
+        # Isolate each scope: a bad org (renamed/invalid/no-permission) or a transient
+        # gh failure must not starve the remaining scopes this cycle. Log and continue.
+        try:
+            scope_items = search_scope(scope, args.limit_per_scope)
+        except Exception as exc:
+            print(f"scope_scan_failed scope={scope}: {exc}", file=sys.stderr)
+            continue
+        for item in scope_items:
             repo_info = item.get("repository") or {}
             repo = repo_info.get("nameWithOwner") if isinstance(repo_info, dict) else ""
             number = int(item.get("number") or 0)

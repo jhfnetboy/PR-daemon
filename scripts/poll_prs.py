@@ -26,7 +26,8 @@ ROOT = Path(__file__).resolve().parent.parent
 STATE_DB = ROOT / ".state" / "pr-daemon" / "pr-watch.sqlite"
 
 # 3 orgs only (per DESIGN.md). Never review personal jhfnetboy PRs.
-ORGS = ["AAStarCommunity", "AuraAIHQ", "MushroomDAO"]
+# NOTE: AuraAIHQ was renamed to iDoris-ai (old name now 404s -> "Invalid search query").
+ORGS = ["AAStarCommunity", "iDoris-ai", "MushroomDAO"]
 
 
 def load_main_user():

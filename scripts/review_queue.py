@@ -8,7 +8,8 @@ A PR is "needs review" if no clestons review exists whose commit == the PR head
 """
 import json, subprocess, sys
 
-ORGS = ["AAStarCommunity", "AuraAIHQ", "MushroomDAO"]
+# AuraAIHQ was renamed to iDoris-ai (old name now 404s -> "Invalid search query").
+ORGS = ["AAStarCommunity", "iDoris-ai", "MushroomDAO"]
 REVIEWER = "clestons"
 
 def gh(args):
