@@ -549,6 +549,25 @@ def _build_codex_cmd(prompt_text: str, roots: list[str]) -> list[str]:
     return cmd
 
 
+def _log_review_eval(row: sqlite3.Row, backend_label: str, duration_sec: float, returncode: int) -> None:
+    """Append one line to reviews/review-eval.tsv for periodic speed/cost analysis.
+    Columns: timestamp \t repo#pr \t backend \t duration \t rc. Never raises."""
+    try:
+        line = "\t".join([
+            time.strftime("%Y-%m-%dT%H:%M:%S"),
+            f"{row['repo']}#{row['pr_number']}",
+            backend_label,
+            f"{duration_sec:.0f}s",
+            f"rc={returncode}",
+        ])
+        eval_path = Path("reviews") / "review-eval.tsv"
+        eval_path.parent.mkdir(parents=True, exist_ok=True)
+        with eval_path.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except Exception:
+        pass
+
+
 def launch_reviewer(row: sqlite3.Row, prompt_path: Path, dry_run: bool) -> int:
     prompt_text = prompt_path.read_text(encoding="utf-8")
     roots = read_workspace_roots()
@@ -579,6 +598,7 @@ def launch_reviewer(row: sqlite3.Row, prompt_path: Path, dry_run: bool) -> int:
 
     print("LAUNCH", row["repo"], f"#{row['pr_number']}", f"[{cli_label}]", shlex.join(cmd[:8]), "...")
     if not dry_run:
+        review_started = time.time()
         # claude runs with `--print` and reads the prompt from stdin — robust when
         # detached (a `-p <arg>` positional errors "Input must be provided…" there).
         # codex takes the prompt as a positional arg and gets EOF on stdin instead.
@@ -597,6 +617,7 @@ def launch_reviewer(row: sqlite3.Row, prompt_path: Path, dry_run: bool) -> int:
             )
             fallback_cmd = _build_codex_cmd(prompt_text, roots)
             result = subprocess.run(fallback_cmd, check=False, stdin=subprocess.DEVNULL)
+        _log_review_eval(row, cli_label, time.time() - review_started, result.returncode)
         return result.returncode
     return 0
 
@@ -610,6 +631,7 @@ def queue_count(conn: sqlite3.Connection) -> int:
           AND is_draft = 0
           AND title NOT LIKE '%WIP%'
           AND title NOT LIKE '%PAUSED%'
+          AND (last_reviewed_head_oid IS NULL OR last_reviewed_head_oid != head_oid)
         """
     ).fetchone()
     return int(row["count"]) if row else 0
@@ -624,6 +646,7 @@ def next_queue_item(conn: sqlite3.Connection) -> sqlite3.Row | None:
           AND is_draft = 0
           AND title NOT LIKE '%WIP%'
           AND title NOT LIKE '%PAUSED%'
+          AND (last_reviewed_head_oid IS NULL OR last_reviewed_head_oid != head_oid)
         ORDER BY
           CASE status
             WHEN 'prompt_ready' THEN 0
