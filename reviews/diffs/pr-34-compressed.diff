@@ -1,0 +1,35 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 115d818..3087bb8 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -31,7 +31,7 @@ jobs:
+         # Don't pass `version:` here to avoid ERR_PNPM_BAD_PM_VERSION conflicts.
+
+       - name: Setup Node.js
+-        uses: actions/setup-node@v6
++        uses: actions/setup-node@v7
+         with:
+           node-version: '22'
+           cache: 'pnpm'
+@@ -110,7 +110,7 @@ jobs:
+         # Don't pass `version:` here to avoid ERR_PNPM_BAD_PM_VERSION conflicts.
+
+       - name: Setup Node.js
+-        uses: actions/setup-node@v6
++        uses: actions/setup-node@v7
+         with:
+           node-version: '22'
+           cache: 'pnpm'
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+index 290b71c..6eb4c16 100644
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -32,7 +32,7 @@ jobs:
+         # Version comes from package.json packageManager field.
+
+       - name: Setup Node.js
+-        uses: actions/setup-node@v6
++        uses: actions/setup-node@v7
+         with:
+           node-version: '22'
+           cache: 'pnpm'

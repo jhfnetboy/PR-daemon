@@ -53,10 +53,17 @@ run_codex_once() {
   local attempt="$1" raw="$OUT_FILE.raw"
   : > "$raw"
 
+  # `< /dev/null` is THE fix, not a detail. Without it `codex exec` prints
+  # "Reading additional input from stdin..." and blocks forever waiting for an
+  # EOF that never arrives, because a non-TTY stdin makes it try to append piped
+  # input to the prompt. That is the entire "codex hangs" phenomenon — it was
+  # never quota, auth, or prompt size. Verified: the exact 8KB prompt that
+  # stalled twice at 39 bytes completes in 19s once stdin is closed.
+  #
   # `set -m` puts the background job in its own process group so kill_tree can
   # signal the entire group via the negative pid.
   set -m
-  codex exec --skip-git-repo-check "$(cat "$PROMPT_FILE")" > "$raw" 2>&1 &
+  codex exec --skip-git-repo-check "$(cat "$PROMPT_FILE")" < /dev/null > "$raw" 2>&1 &
   local pid=$!
   set +m
 

@@ -1,0 +1,1 @@
+UPDATE pr_watch_targets SET last_reviewed_head_oid='846e4f493f40c573649726036361fec7cd69aa6c', status='approved', last_reviewed_at=CURRENT_TIMESTAMP, review_decision='APPROVE' WHERE repo='AAStarCommunity/aastar-sdk' AND pr_number=317;
