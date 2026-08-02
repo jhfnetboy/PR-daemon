@@ -42,6 +42,46 @@ RESOLVE_OWNERS = ORGS + ["jhfnetboy"]
 
 DEFAULT_LIMIT = 8
 
+GOUTOU_DEPS = pathlib.Path("~/Dev/jhfnetboy/goutou/.goutou-deps.json").expanduser()
+
+# Short names jason actually says out loud ("review kms 192"). Keyed by the REPO
+# NAME ONLY, lowercased — never by OWNER/REPO — so an org rename (AuraAIHQ ->
+# iDoris-ai already happened) can't silently break the mapping.
+NICKNAMES = {
+    "airaccount": "kms",
+    "airaccount-contract": "account",
+    "aastar-sdk": "sdk",
+    "superpaymaster": "sp",
+    "yetanotheraa-validator": "dvt",
+    "yetanotheraa": "yaaa",
+    "self-fde-workbench": "workbench",
+    "hack5-net": "hack5",
+    "auraai-packages": "aura-pkg",
+    "agent-speaker": "speaker",
+}
+
+
+def nickname_map() -> dict[str, str]:
+    """repo-name (lowercase) -> short name. Builtins win over the goutou file."""
+    out: dict[str, str] = {}
+    if GOUTOU_DEPS.exists():
+        try:
+            deps = json.loads(GOUTOU_DEPS.read_text()).get("repos", {})
+            for repo_id, meta in deps.items():
+                gh = (meta or {}).get("github", "")
+                if "/" in gh:
+                    out[gh.split("/", 1)[1].lower()] = repo_id
+        except (json.JSONDecodeError, OSError, AttributeError):
+            pass  # stale/absent goutou file must never break the patrol
+    out.update(NICKNAMES)
+    return out
+
+
+def nick(repo: str) -> str:
+    """Short name for OWNER/REPO, falling back to the lowercased repo name."""
+    name = repo.split("/", 1)[1] if "/" in repo else repo
+    return nickname_map().get(name.lower(), name.lower())
+
 
 def state_dir() -> pathlib.Path:
     env = os.environ.get("PR_DAEMON_STATE_DIR")
@@ -210,13 +250,27 @@ def cmd_targets(limit: int, scope_all: bool) -> int:
     pinned_hits = [r for r in ordered if r in pin_set]
     rest = [r for r in ordered if r not in pin_set]
     default_hits = rest if limit <= 0 else rest[:limit]
+    targets = pinned_hits + default_hits
 
+    # Per-repo pending PR numbers, so the scope line can name what it will look at.
+    pending: dict[str, list] = {}
+    for item in queue:
+        pending.setdefault(item.get("repo"), []).append(item.get("pr_number"))
+
+    # SCOPE line: what this cycle will actually watch, in the short names jason
+    # uses. Printed to stderr so stdout stays a clean machine-readable target list.
+    parts = []
+    for repo in targets:
+        nums = sorted(n for n in pending.get(repo, []) if n is not None)
+        pin_mark = "📌" if repo in pin_set else ""
+        parts.append(f"{pin_mark}{nick(repo)}#{','.join(str(n) for n in nums)}")
+    print("SCOPE: " + ("  ".join(parts) if parts else "(无待审 PR)"), file=sys.stderr)
     print(
         "targets: %d pinned + %d recent (of %d repos with pending PRs)"
         % (len(pinned_hits), len(default_hits), len(ordered)),
         file=sys.stderr,
     )
-    for repo in pinned_hits + default_hits:
+    for repo in targets:
         print(repo)
     return 0
 
@@ -243,7 +297,14 @@ def main() -> int:
         help="scope `all`: no cap, plus jhfnetboy/NextStop and jhfnetboy/AISalesMan",
     )
 
+    p_nick = sub.add_parser("nick", help="print the short name for OWNER/REPO")
+    p_nick.add_argument("repo")
+
     args = parser.parse_args()
+
+    if args.cmd == "nick":
+        print(nick(args.repo))
+        return 0
 
     if args.cmd == "targets":
         return cmd_targets(args.limit, args.scope_all)

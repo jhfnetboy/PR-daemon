@@ -156,10 +156,22 @@ prints the target list on stdout, one bare `OWNER/REPO` per line, in review orde
      AAStarCommunity / iDoris-ai / MushroomDAO (scope `all`: no cap, plus
      jhfnetboy/NextStop and jhfnetboy/AISalesMan).
 Repos with nothing pending never appear — a short list, or an empty one, is correct.
-Never pad it out. Use each printed line verbatim; the stderr line is a summary, not a target.
+Never pad it out. Use each printed line verbatim; the stderr lines are summaries, not targets.
+
+📣 **Announce the scope before reviewing anything.** The command prints a
+`SCOPE: kms#193  📌workbench#85  sdk#315,317` line to stderr, using the short names
+jason actually says (`kms` = AirAccount, `sp` = SuperPaymaster, `dvt` =
+YetAnotherAA-Validator, …; `📌` marks a pinned repo). Echo that as ONE line to the
+user, e.g. `本轮盯: kms#193  📌workbench#85`. Do not expand it into a table or restate
+the full OWNER/REPO paths.
 
 Step C — Review each target repo, one at a time, not batched:
 For each repo from Step A+B's stdout, in the order printed:
+  📣 **Before starting each PR, print exactly one line naming it**, using the short name:
+  `▶ review kms#193`. Nothing else — no plan, no preamble, no restating the PR title.
+  Get the short name with `python3 scripts/start_loop_scope.py nick <OWNER/REPO>`
+  (it also appears in the SCOPE line).
+
   invoke the pr-daemon-loop skill scoped to that repo (Skill tool, skill="pr-daemon-loop",
   args="<OWNER/REPO>"), which runs its full unmodified Steps 0-8 (R1a/R1b DeepSeek -> triage
   -> R2 Opus / R3 Codex if 4-round -> R4 verdict -> post -> record) for every PR in that
@@ -178,7 +190,16 @@ For each repo from Step A+B's stdout, in the order printed:
   Keep a running total `k` of PRs actually reviewed (posted a verdict for) across all repos
   this cycle, then move to the next target repo.
 
-Step D — Idle bookkeeping:
+Step D — Cycle report + idle bookkeeping:
+
+📣 **Report the whole cycle in ONE line**, short names, verdict per PR, nothing else:
+  `本轮: kms 193 ❌RC · workbench 85 ❌RC · aura-pkg 34 ✅ — 细节见各 PR comment`
+  Use `✅` for APPROVE and `❌RC` for REQUEST_CHANGES. Group PRs under one short name
+  when a repo had several (`kms 192 ✅ 193 ❌RC`). Reviewed nothing -> `本轮: 无待审 PR`.
+  ⛔ Do NOT restate findings, list rounds, or add sections — the full review already
+  lives in the GitHub comment. The ONE exception is the mandatory per-PR self-assessment
+  block that pr-daemon-loop itself requires; that still applies.
+
 Read .state/pr-daemon/start-loop-idle.json ({"idle_rounds": N}).
   - k == 0 this cycle -> idle_rounds += 1
   - k >= 1 this cycle -> idle_rounds = 0
@@ -186,13 +207,14 @@ Write the updated value back to the same file. Remove the lock file (`rm -f "$LO
 If idle_rounds * <N> >= 60:
   CronList -> find the job whose prompt contains "[[start-loop]]" -> CronDelete it.
   Print: "start-loop: idle 1h+, auto-stopped." Then stop — do not schedule anything else.
-Else print exactly one line: "start-loop: reviewed <k> PR(s), idle_rounds=<idle_rounds>/<60/N rounded>".
+Else append exactly one line: "start-loop: reviewed <k> PR(s), idle_rounds=<idle_rounds>/<60/N rounded>".
 ```
 
 ## Step 5 — Confirm to the user
 
 Report: interval, scope, the current pins (`python3 scripts/start_loop_scope.py pins list`),
-this cycle's resolved target repos, and the cron job id. Remind them: **`CronCreate` jobs are
+this cycle's resolved target repos **by short name** (run `targets` once and echo its
+`SCOPE:` line), and the cron job id. Remind them: **`CronCreate` jobs are
 session-only and auto-expire after 7 days** — if this Claude Code session ends the patrol stops;
 re-run `$start` in a fresh session to resume it. Pins, unlike the job, survive on disk.
 
