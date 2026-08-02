@@ -601,6 +601,8 @@ def queue_count(conn: sqlite3.Connection) -> int:
         FROM pr_watch_targets
         WHERE status IN ('needs_review', 'prompt_ready', 'reviewing')
           AND is_draft = 0
+          AND title NOT LIKE '%WIP%'
+          AND title NOT LIKE '%PAUSED%'
         """
     ).fetchone()
     return int(row["count"]) if row else 0
@@ -613,6 +615,8 @@ def next_queue_item(conn: sqlite3.Connection) -> sqlite3.Row | None:
         FROM pr_watch_targets
         WHERE status IN ('prompt_ready', 'needs_review')
           AND is_draft = 0
+          AND title NOT LIKE '%WIP%'
+          AND title NOT LIKE '%PAUSED%'
         ORDER BY
           CASE status
             WHEN 'prompt_ready' THEN 0

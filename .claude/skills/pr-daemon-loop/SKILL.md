@@ -23,8 +23,11 @@ origin: pr-daemon
 > Opus makes the final APPROVE/REQUEST_CHANGES call on 4-round PRs.
 > Do NOT dismiss a Codex finding without concrete counter-evidence.
 >
-> ⛔ **ABSOLUTE CONSTRAINT #4 — 3 orgs only**
-> Only review PRs in `AAStarCommunity`, `iDoris-ai`, `MushroomDAO`. Never review personal (jhfnetboy) PRs.
+> ⛔ **ABSOLUTE CONSTRAINT #4 — configured scopes only (allowlist)**
+> Review PRs only in the configured scan scopes (`~/.config/prbot/repos.conf`): the `AAStarCommunity`
+> / `iDoris-ai` / `MushroomDAO` orgs, PLUS any personal `owner/repo` explicitly added to that file as
+> an include-list entry (e.g. `jhfnetboy/CMIC`). Personal repos are NOT scanned by default (there are
+> hundreds); the include-list is the allowlist. Never review a personal PR that is not on that list.
 >
 > ⛔ **ABSOLUTE CONSTRAINT #5 — DeepSeek R1a is NEVER optional (added 2026-08-01, user reprimanded)**
 > Run R1a (`deepseek_review.py`, model pinned to `deepseek-v4-flash`) on **every single review round**,
