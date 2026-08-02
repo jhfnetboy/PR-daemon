@@ -1,6 +1,6 @@
 ---
 name: start
-description: Start (or reconfigure) a recurring background PR-patrol job. Default = every 10 min, dynamic top-8 most-pending-review repos across the 3 orgs. "$start all" = full 3-org scan + jhfnetboy/NextStop + jhfnetboy/AISalesMan. "$start Nm [all]" overrides the interval. Self-stops after 1h with nothing to review. Delegates every actual review to the unmodified pr-daemon-loop skill — this skill only schedules and scopes. Triggered by "start", "$start", "开始巡检", "巡检安排".
+description: Start (or reconfigure) a recurring background PR-patrol job. Default = every 10 min, the 8 most-recently-updated repos with pending-review PRs across the 3 orgs, plus any pinned repos. "$start add kms" pins a repo into the scan list permanently; "$start remove kms" unpins it. "$start all" = full 3-org scan + jhfnetboy/NextStop + jhfnetboy/AISalesMan. "$start Nm [all]" overrides the interval. Self-stops after 1h with nothing to review. Delegates every actual review to the unmodified pr-daemon-loop skill — this skill only schedules and scopes. Triggered by "start", "$start", "开始巡检", "巡检安排".
 origin: pr-daemon
 ---
 
@@ -10,7 +10,20 @@ This skill never reviews anything itself and never edits `pr-daemon-loop`. It on
 manages a `CronCreate` job whose fired prompt narrows the repo scope for this cycle
 and then hands each in-scope repo to the existing `pr-daemon-loop` skill, unmodified.
 
+All "which repos" logic lives in `scripts/start_loop_scope.py`, so the cron prompt
+stays short and the selection stays testable outside a fired cycle.
+
 ## Parse the invocation
+
+Two families of invocation — **pin management** (Path A) and **scheduling** (Path B).
+
+**Path A — pin management** (the invocation starts with `add` / `remove` / `pins`):
+
+- `$start add kms` / `$start add OWNER/REPO` → pin a repo, then go to Step 0 below.
+- `$start remove kms` / `$start unpin kms` → unpin, then Step 0.
+- `$start pins` / `$start list` → just print the current pins and stop.
+
+**Path B — scheduling** (everything else):
 
 - `$start` → interval=10, scope=`top8`
 - `$start all` → interval=10, scope=`all`
@@ -23,6 +36,32 @@ and then hands each in-scope repo to the existing `pr-daemon-loop` skill, unmodi
   unparsable → default 10. If the requested number isn't in the set, silently use the closest one
   and mention the substitution in the Step 5 confirmation.
 
+## Step 0 — Pin management (Path A only)
+
+```bash
+cd /Users/jason/Dev/tools/PR-Daemon
+export PR_DAEMON_STATE_DIR=/Users/jason/Dev/tools/PR-Daemon/.state/pr-daemon
+python3 scripts/start_loop_scope.py pins add kms       # or: remove kms / list
+```
+
+The script resolves a bare name (`kms`) against every repo under `AAStarCommunity`,
+`iDoris-ai`, `MushroomDAO`, and `jhfnetboy`; an exact repo-name match wins over a
+substring match. **Ambiguous or unknown names exit non-zero and print the candidates
+rather than pinning a guess** — relay that to the user and stop; do not pick for them.
+A repo outside those four owners must be pinned by its full `OWNER/REPO`.
+
+Pins persist in `.state/pr-daemon/start-loop-pinned.json` and survive `$start`
+re-invocations, session restarts, and the 1h auto-stop. They are **never** cleared by
+Step 2 — only `$start remove` clears them.
+
+Then:
+
+- If a `[[start-loop]]` cron job already exists → **nothing else to do.** The fired
+  prompt recomputes targets from scratch every cycle, so the new pin is picked up on the
+  next fire. Confirm the pin plus the existing job's id/interval and stop.
+- If no patrol job exists → continue into Path B with the defaults (interval=10,
+  scope=`top8`) so the pin actually gets patrolled.
+
 ## Step 1 — Check for an existing patrol job (avoid duplicates)
 
 ```
@@ -31,6 +70,20 @@ CronList
 
 - If a job's prompt contains the marker `[[start-loop]]` → tell the user its id / cron / scope, ask: **replace** (CronDelete it, then continue to Step 2) or **leave running** (stop here, do not create a second one).
 - If some OTHER recurring job looks like it's already doing ad-hoc PR patrol (text like "PR review 巡检" / "有新PR就审") but has no `[[start-loop]]` marker — flag it by id and ask whether to fold it in (delete the old one) instead of running two patrols in parallel.
+
+Also check for the **legacy Python watcher**, which is not a cron job and so never shows
+up in `CronList`:
+
+```bash
+pgrep -f "scripts/review_watch.py" || echo "no legacy watcher"
+```
+
+If it is running it holds an exclusive lock on `pr-watch.sqlite` — every sync in the patrol
+then dies with `database is locked` — *and* it posts its own reviews, so two patrols in
+parallel can double-post. Ask the user whether to stop it (`./watch.sh stop`) before
+continuing. `./watch.sh stop` kills only the watcher; a `claude -p` review subprocess it
+already launched keeps running to completion. Let that one finish rather than leaving
+half-written state, and say so.
 
 ## Step 2 — Reset idle bookkeeping + clear any stale lock
 
@@ -44,6 +97,7 @@ rm -f /Users/jason/Dev/tools/PR-Daemon/.state/pr-daemon/start-loop.lock
 
 Clearing the lock here matters because it's the one file a crashed/killed prior fire could have
 left behind — a fresh `$start` invocation should never inherit a stale lock from a dead cycle.
+**Do not touch `start-loop-pinned.json`** — pins are intentionally sticky.
 
 ## Step 3 — Cron expression
 
@@ -53,13 +107,13 @@ spacing stays exactly `N` minutes across the hour boundary too).
 
 ## Step 4 — Create the job
 
-`CronCreate(recurring: true, cron: "<expr from Step 3>", prompt: "<one of the two full templates below, with <N> substituted>")`.
+`CronCreate(recurring: true, cron: "<expr from Step 3>", prompt: "<the template below, with <N> substituted and the right Step A+B line kept>")`.
 
 The prompt text below is exactly what fires later, cold, with no memory of this conversation —
-it must be fully self-contained. Pick **one** of the two complete templates by scope; do not
-merge them, and do not paste any bracketed meta-text like `<N>` into the real call — substitute it.
+it must be fully self-contained. Do not paste any bracketed meta-text like `<N>` into the real
+call — substitute it.
 
-Both templates share three fixes learned from an adversarial Codex pass on an earlier draft:
+Three fixes learned from an adversarial Codex pass on an earlier draft are baked in:
 
 - **Env**: `PR_DAEMON_STATE_DIR` has no default outside `watch.sh` — export it explicitly, or
   pr-daemon-loop's own `$PR_DAEMON_STATE_DIR/pr-watch.sqlite` references silently resolve to
@@ -67,22 +121,17 @@ Both templates share three fixes learned from an adversarial Codex pass on an ea
 - **Overlap lock**: at `4-59/N` this job can fire again before a slow 4-round review finishes.
   Without a lock, two overlapping fires can double-post a review or race the SQLite/idle-JSON
   writes. A simple mtime-based lock file guards this.
-- **"Needs review" must be read off `last_reviewed_head_oid != head_oid`, not the `status`
-  column, for repo-selection purposes.** `poll_prs.py`'s unscoped `--sync` marks every open row
-  it didn't just see as `closed`, including rows outside the 3 orgs — so in scope `all`, the
-  org-wide sync spuriously closes `jhfnetboy/NextStop` / `jhfnetboy/AISalesMan`, and the next
-  single-repo sync "reopens" them, flipping `status` to `needs_review` regardless of whether
-  anything actually changed. (Verified this is cosmetic, not a real re-review risk:
-  `poll_prs.py`'s own `build_queue()` independently re-derives the actual review queue from a
-  direct head-oid comparison every time it runs — including inside pr-daemon-loop's own Step 1 —
-  so a spurious `status` flip alone never causes a real re-review. The fix here is still worth
-  keeping: without it, Step B would list those two repos as targets on every cycle even when
-  there's nothing to do, invoking pr-daemon-loop only for it to sync, find an empty queue, and
-  return — comparing head oids up front skips that wasted round-trip.)
+- **"Needs review" is read off `last_reviewed_head_oid != head_oid`, never the `status`
+  column.** `poll_prs.py`'s unscoped `--sync` marks every open row it didn't just see as
+  `closed`, including rows outside the 3 orgs — so a pinned out-of-org repo gets spuriously
+  closed by the org-wide sync and "reopened" by its own scoped sync, flipping `status`
+  regardless of whether anything actually changed. `start_loop_scope.py targets` reads
+  `poll_prs.py`'s queue, which re-derives review-needed from a direct head-oid comparison,
+  so it is immune to that churn.
 
-**Template — scope `top8` (default):**
+**Template** (substitute `<N>`; keep exactly one Step A+B command, per the scope):
 ```
-[[start-loop]] PR-Daemon 定时巡检 (scope=top8-pending, interval=<N>m)
+[[start-loop]] PR-Daemon 定时巡检 (scope=<top8-recent | all-3-orgs+extra>, interval=<N>m)
 
 cd /Users/jason/Dev/tools/PR-Daemon
 export PR_DAEMON_STATE_DIR=/Users/jason/Dev/tools/PR-Daemon/.state/pr-daemon
@@ -95,28 +144,37 @@ fi
 touch "$LOCK"
 (on ANY exit path below, including errors, run `rm -f "$LOCK"` before stopping)
 
-Step A — Sync org-wide state:
-python3 scripts/poll_prs.py --sync --max 200
-
-Step B — Determine this cycle's target repos (dynamic, recompute every fire):
-sqlite3 .state/pr-daemon/pr-watch.sqlite "
-  SELECT repo FROM pr_watch_targets
-  WHERE state='open' AND is_draft=0
-    AND (last_reviewed_head_oid IS NULL OR last_reviewed_head_oid != head_oid)
-    AND (repo LIKE 'AAStarCommunity/%' OR repo LIKE 'iDoris-ai/%' OR repo LIKE 'MushroomDAO/%')
-  GROUP BY repo ORDER BY COUNT(*) DESC, MAX(pr_number) DESC LIMIT 8;"
-Repos with the most pending-review (non-draft, head-moved-or-new) PRs right now win a slot.
-Fewer than 8 such repos -> shorter list, that's fine -- never pad it out with idle repos.
-Output is one repo per line (bare `OWNER/REPO`, nothing else) -- use each line verbatim.
+Step A+B — Sync every scope and determine this cycle's target repos (dynamic, recomputed every fire):
+  scope top8 ->  python3 scripts/start_loop_scope.py targets --limit 8
+  scope all  ->  python3 scripts/start_loop_scope.py targets --all
+That one command does the org-wide sync, plus a scoped sync for every pinned /
+out-of-org repo (failures isolated per repo — one dead pin never sinks the cycle), and
+prints the target list on stdout, one bare `OWNER/REPO` per line, in review order:
+  1. every PINNED repo that has pending-review PRs right now (pins never consume a
+     default slot — an explicit pin is always scanned), then
+  2. the 8 MOST RECENTLY UPDATED repos with pending-review PRs across
+     AAStarCommunity / iDoris-ai / MushroomDAO (scope `all`: no cap, plus
+     jhfnetboy/NextStop and jhfnetboy/AISalesMan).
+Repos with nothing pending never appear — a short list, or an empty one, is correct.
+Never pad it out. Use each printed line verbatim; the stderr line is a summary, not a target.
 
 Step C — Review each target repo, one at a time, not batched:
-For each repo from Step B's output, in the order returned:
+For each repo from Step A+B's stdout, in the order printed:
   invoke the pr-daemon-loop skill scoped to that repo (Skill tool, skill="pr-daemon-loop",
   args="<OWNER/REPO>"), which runs its full unmodified Steps 0-8 (R1a/R1b DeepSeek -> triage
   -> R2 Opus / R3 Codex if 4-round -> R4 verdict -> post -> record) for every PR in that
   repo's queue. Override ONLY pr-daemon-loop's Step 8 tail: once that repo's queue is empty,
   RETURN instead of "sleep 300 and re-scan" — this outer cron will wake the patrol again next
   cycle, so an inner infinite wait would just block forever for nothing.
+  ⚠️ EXCEPTION for any target repo NOT under AAStarCommunity / iDoris-ai / MushroomDAO:
+  pr-daemon-loop's own ABSOLUTE CONSTRAINT #4 says "3 orgs only, never jhfnetboy personal
+  PRs" — that constraint does NOT apply to a repo that reached this list, because a repo
+  only gets here by being explicitly pinned by the user (`$start add`) or by being one of
+  the two standing scope-`all` exceptions (jhfnetboy/NextStop, jhfnetboy/AISalesMan, where
+  clestons already holds collaborator access). When invoking pr-daemon-loop for such a repo,
+  explicitly state in the invocation that this is a pre-approved exception to constraint #4
+  for this repo only, so it proceeds instead of skipping. Do not generalize the exception to
+  any repo that is not on this cycle's printed target list.
   Keep a running total `k` of PRs actually reviewed (posted a verdict for) across all repos
   this cycle, then move to the next target repo.
 
@@ -131,63 +189,21 @@ If idle_rounds * <N> >= 60:
 Else print exactly one line: "start-loop: reviewed <k> PR(s), idle_rounds=<idle_rounds>/<60/N rounded>".
 ```
 
-**Template — scope `all`:**
-```
-[[start-loop]] PR-Daemon 定时巡检 (scope=all-3-orgs+extra, interval=<N>m)
-
-cd /Users/jason/Dev/tools/PR-Daemon
-export PR_DAEMON_STATE_DIR=/Users/jason/Dev/tools/PR-Daemon/.state/pr-daemon
-
-Step 0 — Overlap lock: identical to the top8 template's Step 0 (same lock file).
-
-Step A — Sync every scope:
-python3 scripts/poll_prs.py --sync --max 200
-python3 scripts/poll_prs.py --repo jhfnetboy/NextStop --sync --max 50
-python3 scripts/poll_prs.py --repo jhfnetboy/AISalesMan --sync --max 50
-(the org-wide sync above will spuriously flip jhfnetboy/NextStop and jhfnetboy/AISalesMan to
-"closed" for a moment since they're outside its 3-org scope, then the two --repo syncs reopen
-them — this is expected, harmless churn on the `status` column only; Step B below does not
-read `status`, so it is unaffected.)
-
-Step B — Determine this cycle's target repos:
-sqlite3 .state/pr-daemon/pr-watch.sqlite "
-  SELECT DISTINCT repo FROM pr_watch_targets
-  WHERE state='open' AND is_draft=0
-    AND (last_reviewed_head_oid IS NULL OR last_reviewed_head_oid != head_oid)
-    AND (repo LIKE 'AAStarCommunity/%' OR repo LIKE 'iDoris-ai/%' OR repo LIKE 'MushroomDAO/%'
-         OR repo IN ('jhfnetboy/NextStop','jhfnetboy/AISalesMan'));"
-Output is one repo per line (bare `OWNER/REPO`) -- use each line verbatim.
-
-Step C — Review each target repo, one at a time, not batched:
-For each repo from Step B's output:
-  invoke the pr-daemon-loop skill scoped to that repo (Skill tool, skill="pr-daemon-loop",
-  args="<OWNER/REPO>"), which runs its full unmodified Steps 0-8 for every PR in that repo's
-  queue. Override ONLY pr-daemon-loop's Step 8 tail: once that repo's queue is empty, RETURN
-  instead of "sleep 300 and re-scan" — this outer cron will wake the patrol again next cycle.
-  ⚠️ EXCEPTION for repo == jhfnetboy/NextStop or jhfnetboy/AISalesMan ONLY: pr-daemon-loop's
-  own ABSOLUTE CONSTRAINT #4 says "3 orgs only, never jhfnetboy personal PRs" — that constraint
-  does NOT apply to these two specific repos. They are a standing, user-approved exception
-  (clestons already holds collaborator access on both; see the project's own memory record).
-  When invoking pr-daemon-loop for exactly these two repos, explicitly state in the invocation
-  that this is a pre-approved exception to constraint #4 for this repo only, so it proceeds
-  instead of skipping. Every other jhfnetboy/* repo is still off-limits — do not generalize
-  this exception.
-  Keep a running total `k` of PRs actually reviewed (posted a verdict for) across all repos
-  this cycle, then move to the next target repo.
-
-Step D — Idle bookkeeping: identical to the top8 template's Step D.
-```
-
 ## Step 5 — Confirm to the user
 
-Report: interval, scope (list the 8 repos if `top8`, or "3 orgs + NextStop + AISalesMan" if `all`),
-the cron job id, and remind them: **`CronCreate` jobs are session-only and auto-expire after 7 days** —
-if this Claude Code session ends, the patrol stops; re-run `$start` in a fresh session to resume it.
+Report: interval, scope, the current pins (`python3 scripts/start_loop_scope.py pins list`),
+this cycle's resolved target repos, and the cron job id. Remind them: **`CronCreate` jobs are
+session-only and auto-expire after 7 days** — if this Claude Code session ends the patrol stops;
+re-run `$start` in a fresh session to resume it. Pins, unlike the job, survive on disk.
 
 ## Notes
 
 - This skill deliberately does not touch `scripts/review_watch.py` / `watch.sh` (the legacy Python
-  watcher) — those remain independent, optional entry points. `$start` is the Claude-Code-native
-  scheduler for the primary DeepSeek-executor pipeline.
+  watcher) — those remain independent, optional entry points, and Step 1 only asks about stopping
+  one that is already running. `$start` is the Claude-Code-native scheduler for the primary
+  DeepSeek-executor pipeline.
 - `pr-daemon-loop` itself is never edited by this skill, per standing project rule — `$start` only
   decides *when* and *for which repos* it gets invoked.
+- `pr-daemon-loop` is globally `"off"` in `~/.claude/settings.json`; this repo opts back in via a
+  tracked `.claude/settings.json`. If Step C ever fails with "disabled for model invocation in
+  skillOverrides settings", that opt-in is missing or a session-local override shadows it.
