@@ -127,6 +127,12 @@ python3 /Users/jason/Dev/tools/PR-Daemon/scripts/compress_diff.py \
 
 > **Coverage transparency:** `--stats` prints dropped files. If any were dropped, add `Coverage: N files omitted (token budget)` to the review. For a dropped security-sensitive file, fetch it directly.
 
+> **Dependency PRs — splice the lockfile hunk back in:** `compress_diff.py` DROPS lockfiles, so R1
+> reviews a version-number change blind to what actually resolved. For a dependency bump, `git diff`
+> the lockfile for the bumped package's block (`grep -n -A20 "<pkg>" <lockfile>` on both sides) and
+> append those hunks to the R1 context — otherwise flash misses registry switches, integrity
+> mismatches, and transitive drift (observed: Cos72#27 missed an npmmirror→npmjs registry flip).
+
 ## Step 2.5 — Issue / DoD compliance (issue-driven PRs)
 
 When a PR references an issue (title `(#N)`, body `关联/Closes/Refs #N`), verify the diff delivers what the issue asked.
@@ -176,12 +182,12 @@ Both R1a and R1b always go through `deepseek_review.py` (`--mode security` is im
 
 **YOU (Sonnet as executor) confirm the class:**
 
-**2-round (low risk) — needs ALL:**
-- type is docs / chore / style / typo / comments / formatting
-- dependency bump (dependabot/renovate)
-- License / CODEOWNERS / README / badge
+**2-round (low risk) — reserved for PURE bumps/text; needs ALL:**
+- a pure version/dependency bump (dependabot/renovate) / lockfile-only / README / badge / LICENSE / CODEOWNERS text
+- comment / typo / formatting with NO behavioral change
 - does NOT touch `src/` `contracts/` `lib/` real logic
 - NO new public API / schema / migration
+- does NOT touch any automation-consumed file (see the 🔧 rule below)
 
 **4-round (high risk) — ANY triggers it:**
 - type is feat / major refactor
@@ -190,10 +196,18 @@ Both R1a and R1b always go through `deepseek_review.py` (`--mode security` is im
 - concurrency / state machine / data persistence / DB migration
 - API contract / interface / schema change
 - deletes tests / disables security checks / cross-module sweep
+- 🔧 **automation-consumed files (NOT trivial even under `docs/`)**: CI workflows (`.github/workflows/*`),
+  `.pilot.yml`, task/plan ledgers (`docs/agent/tasks.md|roadmap.md|progress.md`), or any config/YAML/TOML
+  parsed & executed by CI / `pilot` / scripts. A bad value here has real consequences — a file being
+  Markdown or "docs" does NOT make it human-only prose.
 
 **Safety bias:**
 - 🔴 security-sensitive → force 4-round, DO NOT accept DeepSeek downgrade
 - uncertain → escalate to 4-round (over-review beats under-review)
+- **anything past a pure bump/text change → at least R2 Opus.** The 2-round (Sonnet-only) path has NO
+  Opus/Codex backstop, and DeepSeek-flash is weakest exactly on judgement calls. When in doubt take the
+  4-round path — the post-R2 severity gate below still SKIPS Codex if R2 finds nothing Medium+, so
+  "config/docs with an Opus read" costs ~R1+R2, not a full 4 rounds.
 
 Record:
 ```bash
@@ -262,6 +276,13 @@ else (all Low / suggestions only):
 ### R3 — Codex PK (Medium+ findings only, targeted hunks)
 
 Codex challenges Opus R2's Medium+ findings (not R1 findings directly).
+
+> **Headless/daemon runs — invoke Codex via `bash scripts/codex_pk.sh` directly, NOT
+> `Agent(codex:codex-rescue)`.** The Agent path spawns internal Bash that a restrictive permission
+> layer can DENY (observed on Brood#13: the R3 sub-agent was blocked, produced no Codex output, and
+> forced a turn-wasting fallback). The direct `codex_pk.sh` Bash call runs `codex exec` in a worktree
+> and is reliable under `--dangerously-skip-permissions` (validated on Self-FDE#63 / #139 / YAA#450).
+> Use `Agent(codex:codex-rescue)` only in an interactive session where you WANT the permission prompts.
 
 **Extract targeted hunks first (Sonnet executor):** for each Opus-confirmed/added Medium+ finding at `file:line`, extract ±20 lines from the compressed diff. One `HUNK <id>:` block per finding.
 

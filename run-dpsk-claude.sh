@@ -42,8 +42,8 @@ fi
 # 设置环境变量
 export ANTHROPIC_BASE_URL="https://api.deepseek.com/anthropic"
 export ANTHROPIC_AUTH_TOKEN="$DEEPSEEK_API_KEY"
-export ANTHROPIC_DEFAULT_OPUS_MODEL="deepseek-v4-pro"
-export ANTHROPIC_DEFAULT_SONNET_MODEL="deepseek-v4-pro"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="deepseek-v4-flash"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="deepseek-v4-flash"
 export ANTHROPIC_DEFAULT_HAIKU_MODEL="deepseek-v4-flash"
 
 # 显示模式（仅当有终端且非静默模式时）

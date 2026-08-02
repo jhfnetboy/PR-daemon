@@ -416,31 +416,114 @@ def _add_dir_flags(roots: list[str]) -> list[str]:
     return flags
 
 
-def _build_claude_cmd(prompt_text: str, roots: list[str]) -> list[str]:
-    reviewer_script = str(Path.cwd() / "run-dpsk-claude.sh")
-    model = os.environ.get("PR_DAEMON_REVIEWER_MODEL", "opus")
-    max_turns = os.environ.get("PR_DAEMON_REVIEWER_MAX_TURNS", "40")
+# --- Cost gate: pick the review backend by changed-files risk --------------
+# The pr-daemon-loop skill routes R1=DeepSeek-flash (own API), executor=session
+# model, and R2/R4=Opus + R3=Codex via Agent() sub-agents. Because ANTHROPIC_*
+# overrides are process-global, a session launched through run-dpsk-claude.sh
+# resolves those "opus" sub-agents to DeepSeek too. So we pick the backend PER PR:
+#   trivial (pure docs/deps/chore) -> DeepSeek shell (cheap, ~free)
+#   everything else / any uncertainty -> real Anthropic (real Opus + Codex)
+# The gate is coarse and CONSERVATIVE (default 'real'); the skill's own Step-4
+# triage still assigns the accurate 2/4-round label inside the chosen session.
+_TRIVIAL_SUFFIXES = (
+    ".md", ".mdx", ".markdown", ".rst", ".txt",
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico",
+)
+_TRIVIAL_BASENAMES = frozenset({
+    "license", "license.md", "notice", "notice.md", "contributing.md",
+    "codeowners", "readme", "readme.md", ".gitignore", ".editorconfig",
+    "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
+    "cargo.toml", "cargo.lock", "go.mod", "go.sum", "requirements.txt",
+    "poetry.lock", "gemfile.lock",
+})
+
+
+# Automation-consumed ledgers/config: look like docs/markdown but are parsed & executed by
+# CI / pilot / scripts, so a bad value has real consequences — NOT trivial (route to real backend).
+_LEDGER_PATH_HINTS = ("docs/agent/", ".pilot.yml", ".pilot.yaml")
+_LEDGER_BASENAMES = frozenset({"tasks.md", "roadmap.md", "progress.md"})
+
+
+def _is_trivial_path(path: str) -> bool:
+    p = path.strip().lower()
+    if not p:
+        return False
+    base = p.rsplit("/", 1)[-1]
+    # automation-consumed ledgers/config are NOT trivial, even under docs/ (YAA#450)
+    if any(h in p for h in _LEDGER_PATH_HINTS) or base in _LEDGER_BASENAMES:
+        return False
+    if p.startswith("docs/"):
+        return True
+    if base in _TRIVIAL_BASENAMES:
+        return True
+    return p.endswith(_TRIVIAL_SUFFIXES)
+
+
+def pr_changed_files(repo: str, pr_number: int) -> list[str] | None:
+    """Changed file paths for a PR via gh. None on any failure (caller = safe side)."""
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "view", str(pr_number), "--repo", repo,
+             "--json", "files", "--jq", ".files[].path"],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    return [ln.strip() for ln in result.stdout.splitlines() if ln.strip()]
+
+
+def triage_gate(row: sqlite3.Row) -> str:
+    """Return 'deepseek' (cheap) or 'real' (Anthropic). Conservative: default 'real'.
+
+    Only a PR whose EVERY changed file is provably trivial gets the cheap backend.
+    PR_DAEMON_FORCE_BACKEND=deepseek|real overrides the gate (for tests/spikes).
+    """
+    forced = os.environ.get("PR_DAEMON_FORCE_BACKEND", "").strip().lower()
+    if forced in ("deepseek", "real"):
+        return forced
+    files = pr_changed_files(row["repo"], int(row["pr_number"]))
+    if not files:
+        return "real"  # gh failed or empty -> real (safe side)
+    return "deepseek" if all(_is_trivial_path(f) for f in files) else "real"
+
+
+def _build_claude_cmd(roots: list[str], backend: str = "deepseek") -> list[str]:
+    # The prompt is NOT embedded here — it is fed via stdin by launch_reviewer using
+    # `--print`. A `-p <prompt>` positional is unreliable when claude runs detached
+    # (it waits on / errors reading stdin: "Input must be provided…"); stdin-fed is robust.
+    max_turns = os.environ.get("PR_DAEMON_REVIEWER_MAX_TURNS", "80")
     skill_file = str(Path.cwd() / ".claude/skills/pr-daemon-loop/SKILL.md")
+    if backend == "real":
+        # Real Anthropic (Max OAuth): executor = real Sonnet, R2/R4 spawn real Opus,
+        # R3 real Codex. `env -u` strips any ambient DeepSeek override so the CLI hits
+        # api.anthropic.com, never the DeepSeek endpoint.
+        model = os.environ.get("PR_DAEMON_REAL_MODEL", "sonnet")
+        launch = [
+            "env",
+            "-u", "ANTHROPIC_BASE_URL",
+            "-u", "ANTHROPIC_AUTH_TOKEN",
+            "-u", "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "-u", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "-u", "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "claude",
+        ]
+    else:
+        # Cheap DeepSeek backend (all model aliases -> deepseek-v4-flash via the shell).
+        model = os.environ.get("PR_DAEMON_DEEPSEEK_MODEL", "sonnet")
+        launch = ["bash", str(Path.cwd() / "run-dpsk-claude.sh")]
     cmd = [
-        "bash",
-        reviewer_script,
-        "-p",
-        prompt_text,
+        *launch,
+        "--print",
         "--model",
         model,
-        "--permission-mode",
-        "dontAsk",
-        "--allowedTools",
-        "Read",
-        "Write",
-        "Edit",
-        "Bash(git *)",
-        "Bash(gh *)",
-        "Bash(python3 *)",
-        "Bash(codex *)",
-        "Bash(bash scripts/post_pr_review.sh*)",
-        "Bash(bash scripts/rapid_mlx_daemon.sh*)",
-        "Bash(sqlite3 *)",
+        # Autonomous headless reviewer: skip the permission layer so R3's
+        # codex:codex-rescue sub-agent (and its internal Bash) runs natively instead of
+        # being denied and forced into a turn-wasting fallback (observed on Brood#13).
+        # No-post during tests is enforced by post_pr_review.sh's PR_DAEMON_NO_POST
+        # guard, not by tool allow-listing.
+        "--dangerously-skip-permissions",
         "--append-system-prompt-file",
         skill_file,
         "--max-turns",
@@ -478,8 +561,9 @@ def launch_reviewer(row: sqlite3.Row, prompt_path: Path, dry_run: bool) -> int:
     use_claude = use_claude and Path("run-dpsk-claude.sh").exists()
 
     if use_claude:
-        cmd = _build_claude_cmd(prompt_text, roots)
-        cli_label = "claude(deepseek)"
+        backend = triage_gate(row)
+        cmd = _build_claude_cmd(roots, backend=backend)
+        cli_label = "claude(real-anthropic)" if backend == "real" else "claude(deepseek)"
     elif shutil.which(fallback_cli):
         cmd = _build_codex_cmd(prompt_text, roots)
         cli_label = fallback_cli
@@ -488,9 +572,15 @@ def launch_reviewer(row: sqlite3.Row, prompt_path: Path, dry_run: bool) -> int:
         cmd = _build_codex_cmd(prompt_text, roots)
         cli_label = "codex(default)"
 
-    print("LAUNCH", row["repo"], f"#{row['pr_number']}", f"[{cli_label}]", shlex.join(cmd[:6]), "...")
+    print("LAUNCH", row["repo"], f"#{row['pr_number']}", f"[{cli_label}]", shlex.join(cmd[:8]), "...")
     if not dry_run:
-        result = subprocess.run(cmd, check=False)
+        # claude runs with `--print` and reads the prompt from stdin — robust when
+        # detached (a `-p <arg>` positional errors "Input must be provided…" there).
+        # codex takes the prompt as a positional arg and gets EOF on stdin instead.
+        if use_claude:
+            result = subprocess.run(cmd, check=False, input=prompt_text, text=True)
+        else:
+            result = subprocess.run(cmd, check=False, stdin=subprocess.DEVNULL)
         # On non-zero exit from primary, retry with Codex if different binary was used
         if result.returncode != 0 and use_claude and shutil.which(fallback_cli):
             print(
@@ -499,7 +589,7 @@ def launch_reviewer(row: sqlite3.Row, prompt_path: Path, dry_run: bool) -> int:
                 file=sys.stderr,
             )
             fallback_cmd = _build_codex_cmd(prompt_text, roots)
-            result = subprocess.run(fallback_cmd, check=False)
+            result = subprocess.run(fallback_cmd, check=False, stdin=subprocess.DEVNULL)
         return result.returncode
     return 0
 

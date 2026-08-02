@@ -21,6 +21,14 @@ ROOT = Path(__file__).resolve().parent.parent
 SECURITY_PROMPT = """You are R1b of a multi-round PK code review — security-only lens.
 Examine ONLY security concerns in the diff below. Output EXACTLY these sections and NOTHING else.
 
+FAST EXIT (check this FIRST, before anything else): if the diff has NO security-relevant surface —
+no auth, crypto, signature/nonce, payment/token, permission/access-control, state persistence, or
+untrusted-input handling (e.g. the diff is only docs / markdown / JSON / config / lockfiles / build
+output) — then output EXACTLY these two lines and STOP. Do NOT repeat, elaborate, or add anything:
+SECURITY_FINDINGS: (none — no security-relevant surface in diff)
+SECURITY_TRIAGE: clean — no security-relevant code
+Otherwise, produce the sections below.
+
 SECURITY_FINDINGS:
 <numbered list. each: [Critical|High|Medium|Low] file:line — issue <=15 words | fix <=12 words.
 Focus: auth bypass, missing access control, reentrancy, integer overflow/underflow, signature replay,
@@ -31,6 +39,10 @@ Only real issues provable from the diff. Empty list OK if none.>
 
 EVIDENCE RULE (HARD): Every finding MUST cite the exact diff line numbers that prove it.
 Counter-evidence check: scan the ENTIRE diff for code that already handles the issue. If handled, omit.
+
+INPUT-CONTROLLABILITY RULE (HARD): before flagging SSRF/injection/untrusted-input, confirm the value
+is request/attacker-controllable. A value settable ONLY via env var, deploy config, or server-side
+constant is NOT attacker-controllable — do NOT flag it. (This is the #1 R1b false-positive class.)
 
 SECURITY_TRIAGE: clean|low|medium|high|critical — <reason <=10 words>
 
@@ -90,6 +102,16 @@ FRAMEWORK GUARDS (check before flagging):
 PAYMENT / NONCE SCOPE CHECK: For any code that constructs a nonce key or nonce store key,
 verify the key includes ALL required namespace dimensions: chainId + payer address (from/sender) + nonce value.
 A key of only `chainId:nonce` is a cross-payer nonce burning vulnerability.
+
+INPUT-CONTROLLABILITY RULE (HARD — kills the recurring SSRF/injection false positives):
+Before flagging SSRF / injection / "untrusted input", identify WHO controls the value. Only flag if
+it is request/attacker-controllable (query param, request body, header, uploaded file, a URL the
+user picks). A value that can ONLY be set via environment variable, build/deploy config, or a
+server-side constant is NOT attacker-controllable — do NOT flag it as SSRF/injection.
+
+CONFIG-DEFAULT RULE: Do NOT flag a config value or default as "wrong/insecure" unless the diff
+ITSELF proves it wrong. If the justification would live in surrounding code/docs the diff does not
+include, emit "[Low] needs-context: <value> — verify default" instead of asserting a bug.
 
 TRIAGE: <trivial|significant> — <reason <=15 words>
 (trivial = docs/chore/deps/license/format with no core-logic/security change;
@@ -173,8 +195,11 @@ def main():
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.2,
-        "max_tokens": 6000,
-        "frequency_penalty": 0.5,
+        # Security findings are terse; cap tighter so a degenerate repetition loop
+        # (e.g. flash on a no-security-surface docs diff) can't burn the whole budget.
+        "max_tokens": 3000 if mode == "security" else 6000,
+        "frequency_penalty": 0.6,
+        "presence_penalty": 0.3,
     }
     if thinking_disabled:
         payload["thinking"] = {"type": "disabled"}

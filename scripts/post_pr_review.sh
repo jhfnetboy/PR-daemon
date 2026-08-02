@@ -54,6 +54,14 @@ if [ "$MODE" != "--approve" ] && [ ! -s "$BODY_FILE" ]; then
   exit 2
 fi
 
+# Dry-run guard: with PR_DAEMON_NO_POST=1 this never touches GitHub (no account
+# switch, no POST). Used for validation runs; the review body is echoed to stderr.
+if [ "${PR_DAEMON_NO_POST:-0}" = "1" ]; then
+  echo "PR_DAEMON_NO_POST=1 — dry run: NOT posting. Would $MODE to $REPO#$PR. Body:" >&2
+  [ -f "$BODY_FILE" ] && cat "$BODY_FILE" >&2 || true
+  exit 0
+fi
+
 restore_main() {
   if [ "${PR_DAEMON_RESTORE_MAIN:-1}" = "1" ]; then
     active=""
