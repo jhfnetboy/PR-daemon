@@ -555,6 +555,9 @@ def launch_reviewer(row: sqlite3.Row, prompt_path: Path, dry_run: bool) -> int:
 
     primary_cli = os.environ.get("PR_DAEMON_REVIEWER_CLI", "claude")
     fallback_cli = os.environ.get("PR_DAEMON_REVIEWER_FALLBACK", "codex")
+    # Codex fallback is OFF by default: a failed claude review would otherwise be re-run
+    # with codex, which produces low-quality/garbage output that could get posted.
+    allow_codex_fallback = os.environ.get("PR_DAEMON_ALLOW_CODEX_FALLBACK", "0") == "1"
 
     # Determine which CLI to use based on binary availability
     use_claude = primary_cli == "claude" and shutil.which("claude") is not None
@@ -564,13 +567,15 @@ def launch_reviewer(row: sqlite3.Row, prompt_path: Path, dry_run: bool) -> int:
         backend = triage_gate(row)
         cmd = _build_claude_cmd(roots, backend=backend)
         cli_label = "claude(real-anthropic)" if backend == "real" else "claude(deepseek)"
-    elif shutil.which(fallback_cli):
+    elif allow_codex_fallback and shutil.which(fallback_cli):
         cmd = _build_codex_cmd(prompt_text, roots)
         cli_label = fallback_cli
     else:
-        # Last resort: codex with default roots
-        cmd = _build_codex_cmd(prompt_text, roots)
-        cli_label = "codex(default)"
+        # Codex fallback disabled -> fail loudly instead of reviewing with (and posting) codex.
+        raise RuntimeError(
+            "claude reviewer unavailable and codex fallback is disabled "
+            "(set PR_DAEMON_ALLOW_CODEX_FALLBACK=1 to re-enable)"
+        )
 
     print("LAUNCH", row["repo"], f"#{row['pr_number']}", f"[{cli_label}]", shlex.join(cmd[:8]), "...")
     if not dry_run:
@@ -581,8 +586,10 @@ def launch_reviewer(row: sqlite3.Row, prompt_path: Path, dry_run: bool) -> int:
             result = subprocess.run(cmd, check=False, input=prompt_text, text=True)
         else:
             result = subprocess.run(cmd, check=False, stdin=subprocess.DEVNULL)
-        # On non-zero exit from primary, retry with Codex if different binary was used
-        if result.returncode != 0 and use_claude and shutil.which(fallback_cli):
+        # On non-zero exit: retry with codex ONLY if the fallback is explicitly enabled.
+        # Disabled by default -> a failed review propagates so the daemon requeues the PR
+        # (prompt_ready) and logs launch_error, instead of posting garbage from codex.
+        if result.returncode != 0 and use_claude and allow_codex_fallback and shutil.which(fallback_cli):
             print(
                 f"FALLBACK {row['repo']}#{row['pr_number']} {cli_label} exited {result.returncode};"
                 f" retrying with {fallback_cli}",
