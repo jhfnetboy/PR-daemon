@@ -225,6 +225,19 @@ python3 /Users/jason/Dev/tools/PR-Daemon/scripts/triage_db.py record \
 
 This is the one place where Sonnet makes a judgment call — and only for truly low-risk PRs where the stakes are low enough that Sonnet's verdict is acceptable.
 
+**Docs-PR blocking bar (pure prose / aggregation markdown — no code, no automation-consumed config).**
+For a PR that only touches human-read prose (`*.md` docs, backlog task/doc bodies, READMEs), REQUEST_CHANGES **only** on a **substantive error** — something factually wrong that would mislead a reader or operator:
+- a wrong command / wrong port / wrong endpoint / wrong path vs the real code it documents,
+- a referenced repo / file / PR / tag that does not exist (404),
+- a broken cross-reference, or a claim contradicted by the repo's own state.
+
+**Internal-precision nits are NON-BLOCKING — report them as suggestions in the COMMENT body, do NOT REQUEST_CHANGES for them:**
+- a count/number that disagrees between two lines, an item mis-numbered, a summary sentence that slightly over-claims scope ("all X done" when most are),
+- "missing link / test evidence" objections against pure prose,
+- wording / style / consistency polish.
+
+A pure-docs PR should converge in **ONE round** unless it contains a substantive factual error. Rationale: cycling a prose PR through repeated REQUEST_CHANGES rounds for internal-precision nits costs far more (full reviewer + author round-trips, queue time) than the nit is worth — flag them once as suggestions and APPROVE. (This does NOT relax the bar for automation-consumed files under Step 4 — those are not "pure prose".)
+
 Go to Step 6.
 
 ## Step 5b — 4-round path (high risk)
