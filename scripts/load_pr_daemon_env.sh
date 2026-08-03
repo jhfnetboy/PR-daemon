@@ -30,6 +30,14 @@ proxy_pick() {
   done
 }
 
+# An explicitly-empty PR_DAEMON_*_PROXY in .env means "force NO proxy" — clear any proxy the
+# daemon inherited from the launching shell (e.g. a stale HTTPS_PROXY/ALL_PROXY=127.0.0.1:7890),
+# which proxy_pick below would otherwise preserve because it prefers an already-set target value.
+# Only clear when .env actually DEFINES the var as empty (not merely absent).
+if [ "${PR_DAEMON_HTTPS_PROXY+def}" = "def" ] && [ -z "${PR_DAEMON_HTTPS_PROXY}" ]; then unset HTTPS_PROXY https_proxy; fi
+if [ "${PR_DAEMON_HTTP_PROXY+def}" = "def" ]  && [ -z "${PR_DAEMON_HTTP_PROXY}" ];  then unset HTTP_PROXY http_proxy; fi
+if [ "${PR_DAEMON_ALL_PROXY+def}" = "def" ]   && [ -z "${PR_DAEMON_ALL_PROXY}" ];   then unset ALL_PROXY all_proxy; fi
+
 proxy_pick HTTPS_PROXY PR_DAEMON_HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy
 proxy_pick HTTP_PROXY PR_DAEMON_HTTP_PROXY http_proxy HTTPS_PROXY https_proxy ALL_PROXY all_proxy
 proxy_pick ALL_PROXY PR_DAEMON_ALL_PROXY all_proxy HTTPS_PROXY https_proxy HTTP_PROXY http_proxy
