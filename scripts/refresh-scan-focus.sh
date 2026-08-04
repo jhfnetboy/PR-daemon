@@ -7,10 +7,16 @@
 # letting you PIN specific repos that must always be watched regardless of recency.
 #
 #   refresh-scan-focus.sh                 # (default) recompute top-N + pinned → write repos.conf
-#   refresh-scan-focus.sh refresh         # same as above
+#   refresh-scan-focus.sh refresh         # same as above (FORCE — always recomputes)
+#   refresh-scan-focus.sh daily           # once-per-day IDEMPOTENT refresh (skips if already
+#                                         #   done today); the entry point daemon-start & pilot
+#                                         #   status call — many callers/day, GitHub hit once
 #   refresh-scan-focus.sh add o/r [o/r…]  # pin repo(s) (always watched), then recompute
 #   refresh-scan-focus.sh rm  o/r [o/r…]  # unpin repo(s), then recompute
 #   refresh-scan-focus.sh list            # show what repos.conf currently resolves to
+#
+# Daily gate: $CFG/.focus-last-refresh holds the YYYY-MM-DD of the last real refresh; a same-day
+# `daily` is a no-op. $CFG/focus-history.log records "<date>\t<resolved repo list>" per refresh.
 #
 # Config files under $CFG (auto-created with sane defaults on first run):
 #   candidate-orgs.conf       orgs whose repos form the top-N candidate pool (one per line)
@@ -106,10 +112,24 @@ for x in json.load(sys.stdin): print(x['pushedAt']+'\t'+x['nameWithOwner'])" >> 
   rm -f "$scan" "$topn" "$pins"
 }
 
+daily() {
+  local stamp="$CFG/.focus-last-refresh" hist="$CFG/focus-history.log" today
+  today="$(date +%F)"
+  if [ -f "$stamp" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$today" ]; then
+    echo "scan focus already refreshed today ($today) — idempotent no-op ($(grep -vcE '^\s*#|^\s*$' "$OUT" 2>/dev/null) repos)"
+    return 0
+  fi
+  refresh
+  echo "$today" > "$stamp"
+  printf '%s\t%s\n' "$today" "$(grep -vE '^\s*#|^\s*$' "$OUT" 2>/dev/null | paste -sd, -)" >> "$hist"
+  echo "recorded $today → $hist"
+}
+
 case "${1:-refresh}" in
   refresh) refresh ;;
+  daily) daily ;;
   add) shift; [ $# -ge 1 ] || { echo "usage: add <owner/repo>..." >&2; exit 2; }; pin_add "$@"; refresh ;;
   rm)  shift; [ $# -ge 1 ] || { echo "usage: rm <owner/repo>..."  >&2; exit 2; }; pin_rm  "$@"; refresh ;;
   list) echo "repos.conf resolves to:"; grep -vE '^\s*#|^\s*$' "$OUT" | nl -w2 -s'. ' ;;
-  *) echo "usage: refresh-scan-focus.sh [refresh|add <o/r>|rm <o/r>|list]" >&2; exit 2 ;;
+  *) echo "usage: refresh-scan-focus.sh [refresh|daily|add <o/r>|rm <o/r>|list]" >&2; exit 2 ;;
 esac

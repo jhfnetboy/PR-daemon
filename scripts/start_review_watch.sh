@@ -133,6 +133,31 @@ if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
   exit 0
 fi
 
+# --- refresh scan focus BEFORE launching (update repos.conf, then start) ---
+# `daily` = once-per-day IDEMPOTENT recompute of top-N most-recently-pushed + pinned
+# repos. Daemon start is ONE of several callers (pilot status in any repo also calls
+# it); the date stamp means GitHub is hit at most once/day no matter how many restarts
+# or statuses fire. Best-effort + BOUNDED: a hung/failing gh call must never wedge or
+# block startup — on timeout/error we keep the existing repos.conf and start anyway.
+# Runs past the already-running guard, so it never churns the list mid-review. NO
+# periodic refresh — the list only moves on the day's first start/status.
+FOCUS_SCRIPT="$ROOT/scripts/refresh-scan-focus.sh"
+FOCUS_TIMEOUT="${PR_DAEMON_FOCUS_TIMEOUT:-45}"
+if [ -x "$FOCUS_SCRIPT" ] && [ "${PR_DAEMON_SKIP_FOCUS_REFRESH:-0}" != "1" ]; then
+  echo "refreshing scan focus (daily, top-N by recent push, ${FOCUS_TIMEOUT}s cap)…"
+  "$FOCUS_SCRIPT" daily >>"$LOG_FILE" 2>&1 &
+  _focus_pid=$!
+  ( sleep "$FOCUS_TIMEOUT"; kill -0 "$_focus_pid" 2>/dev/null && kill "$_focus_pid" 2>/dev/null ) &
+  _focus_watch=$!
+  if wait "$_focus_pid" 2>/dev/null; then _focus_rc=0; else _focus_rc=$?; fi
+  kill "$_focus_watch" 2>/dev/null; wait "$_focus_watch" 2>/dev/null
+  if [ "$_focus_rc" -eq 0 ]; then
+    echo "scan focus updated → $(grep -vcE '^\s*#|^\s*$' "$HOME/.config/prbot/repos.conf" 2>/dev/null) repos"
+  else
+    echo "scan-focus refresh failed/timed out (rc=$_focus_rc) — keeping existing repos.conf" >&2
+  fi
+fi
+
 cd "$ROOT"
 {
   echo "==== $(date '+%Y-%m-%d %H:%M:%S') start_review_watch.sh ===="
