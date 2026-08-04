@@ -27,9 +27,27 @@ case "$ACTION" in
       where key = "last_full_sync_epoch";
     ' 2>/dev/null || true
     echo "---"
+    # Counts for LIVE PRs only. closed/merged are settled history (hundreds of rows) and
+    # drowned the handful of statuses that still mean something; draft/WIP aren't ours to
+    # act on. Same standard as review_watch.is_actionable, so this summary and the scan
+    # printout can't tell different stories.
+    # Counts for PRs that still need action from someone. Excluded on purpose:
+    #   closed/merged  — settled history (hundreds of rows) that drowned the live ones
+    #   draft/WIP/PAUSED — author says not ready; we never review these
+    #   approved       — verdict delivered, nothing left to do
+    #   seen           — tracked-but-unclassified, and mostly STALE: the scan only returns
+    #                    OPEN PRs, so a row whose PR was closed later never gets updated and
+    #                    sits at state=OPEN forever. Counting it implied live work that
+    #                    doesn'"'"'t exist.
+    # Same standard as review_watch.is_actionable, so this summary and the scan printout
+    # can'"'"'t tell different stories.
     sqlite3 "$PR_DAEMON_REVIEW_WATCH_DB" '
       select status, count(*)
       from pr_watch_targets
+      where status in ("needs_review","prompt_ready","reviewing","changes_requested","commented")
+        and is_draft = 0
+        and title not like "%WIP%"
+        and title not like "%PAUSED%"
       group by status
       order by count(*) desc, status asc;
     ' 2>/dev/null || true
@@ -37,7 +55,11 @@ case "$ACTION" in
     sqlite3 "$PR_DAEMON_REVIEW_WATCH_DB" '
       select repo, pr_number, status, substr(head_oid,1,7), coalesce(last_review_event, "")
       from pr_watch_targets
-      where status in ("needs_review","prompt_ready","reviewing","changes_requested","approved","commented")
+      where status in ("needs_review","prompt_ready","reviewing")
+        and is_draft = 0
+        and title not like "%WIP%"
+        and title not like "%PAUSED%"
+        and (last_reviewed_head_oid is null or last_reviewed_head_oid != head_oid)
       order by
         case status
           when "reviewing" then 0

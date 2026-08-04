@@ -714,8 +714,39 @@ def should_refresh(conn: sqlite3.Connection, refresh_interval: int) -> bool:
     return age >= refresh_interval
 
 
+# Statuses that mean "this PR still needs something from us". Anything else — approved,
+# changes_requested (verdict already delivered), commented, merged, closed, draft, seen —
+# is settled or not ours to act on.
+ACTIONABLE_STATUSES = frozenset({"needs_review", "prompt_ready", "reviewing"})
+
+# Title markers the author uses to say "not ready, don't review" — same list the review
+# queue filters on (see queue_count / next_queue_item). Kept in one place so the scan
+# printout and the queue can never disagree about what counts as reviewable.
+SKIP_TITLE_MARKERS = ("WIP", "PAUSED")
+
+
+def is_actionable(status: str, item: dict) -> bool:
+    """Should this PR appear in the per-cycle scan printout?
+
+    The printout is a WORK LIST, not an inventory. Printing every tracked PR every cycle
+    buried the few PRs that actually need review under dozens of already-approved / draft /
+    WIP lines, and made settled PRs look like they were queued up to be re-reviewed. The DB
+    still tracks everything (state transitions depend on it) — only the noise is suppressed.
+
+    Conditions mirror queue_count()/next_queue_item() exactly, so if a line prints here it
+    really is a candidate for review, and if it doesn't print it really won't be reviewed.
+    """
+    if status not in ACTIONABLE_STATUSES:
+        return False
+    if item.get("isDraft"):
+        return False
+    title = str(item.get("title") or "")
+    return not any(marker in title for marker in SKIP_TITLE_MARKERS)
+
+
 def refresh_from_remote(conn: sqlite3.Connection, args: argparse.Namespace, scopes: list[str]) -> int:
     seen = 0
+    actionable = 0
     for scope in scopes:
         # Isolate each scope: a bad org (renamed/invalid/no-permission) or a transient
         # gh failure must not starve the remaining scopes this cycle. Log and continue.
@@ -731,7 +762,9 @@ def refresh_from_remote(conn: sqlite3.Connection, args: argparse.Namespace, scop
             try:
                 status, _ = upsert_pr(conn, item)
                 seen += 1
-                print(f"{status:16} {repo}#{number} {item.get('title')}")
+                if is_actionable(status, item):
+                    actionable += 1
+                    print(f"{status:16} {repo}#{number} {item.get('title')}")
             except RuntimeError as exc:
                 conn.execute(
                     """
@@ -742,6 +775,11 @@ def refresh_from_remote(conn: sqlite3.Connection, args: argparse.Namespace, scop
                 )
                 print(f"{'scan_error':16} {repo}#{number} {exc}", file=sys.stderr)
     set_meta(conn, "last_full_sync_epoch", str(int(time.time())))
+    # Say plainly how many were hidden, so an empty work list reads as "nothing to do"
+    # rather than "the scan broke" — and so suppression is never silent.
+    hidden = seen - actionable
+    if hidden > 0:
+        print(f"scan: {actionable} actionable / {seen} open (hidden {hidden}: approved/draft/WIP/settled)")
     return seen
 
 
