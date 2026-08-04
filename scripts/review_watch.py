@@ -327,12 +327,44 @@ def mark_reviewing(conn: sqlite3.Connection, row: sqlite3.Row) -> None:
     )
 
 
+def latest_clestons_review_commit(repo: str, number: int) -> str:
+    """Commit SHA the latest clestons review was ACTUALLY posted on, via the REST reviews API
+    (unlike gh's `latestReviews.commit.oid`, which comes back empty). Returns "" if none.
+
+    Used so refresh_review_state records the REVIEWED head, not the current PR head: a reviewer
+    subprocess that returned rc=0 but never posted at the current head (a "phantom run") would
+    otherwise mark last_reviewed_head_oid = current head and silently stall — the PR looks
+    reviewed to the queue but GitHub never got the verdict. Recording the review's real commit
+    leaves last_reviewed at the old/empty SHA, so the PR stays needs_review and gets re-reviewed.
+    """
+    review_user = os.environ.get("PR_DAEMON_REVIEW_USER", "clestons")
+    try:
+        data = run_json(
+            ["gh", "api", f"repos/{repo}/pulls/{number}/reviews", "--paginate"],
+            retries=2,
+        )
+    except Exception:
+        return ""
+    if not isinstance(data, list):
+        return ""
+    commit = ""
+    for review in data:  # REST returns chronological order → keep the LAST clestons review
+        if isinstance(review, dict):
+            user = review.get("user") or {}
+            if isinstance(user, dict) and user.get("login") == review_user:
+                commit = str(review.get("commit_id") or "")
+    return commit
+
+
 def refresh_review_state(conn: sqlite3.Connection, repo: str, pr_number: int) -> None:
     viewed = view_pr(repo, pr_number)
     clestons_state = latest_clestons_state(viewed)
     state = str(viewed.get("state") or "")
     review_decision = str(viewed.get("reviewDecision") or "")
     head_oid = str(viewed.get("headRefOid") or "")
+    # The head the review was ACTUALLY posted on — NOT the current PR head — so a phantom rc=0 run
+    # that didn't post leaves last_reviewed at the old/empty SHA and the PR stays needs_review.
+    review_commit = latest_clestons_review_commit(repo, pr_number)
 
     if state != "OPEN":
         status = state.lower() or "closed"
@@ -357,7 +389,7 @@ def refresh_review_state(conn: sqlite3.Connection, repo: str, pr_number: int) ->
             status = ?
         WHERE repo = ? AND pr_number = ?
         """,
-        (head_oid, review_decision, head_oid, clestons_state, status, repo, pr_number),
+        (head_oid, review_decision, review_commit, clestons_state, status, repo, pr_number),
     )
 
 

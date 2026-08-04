@@ -25,9 +25,13 @@ PROMPT_FILE="${1:?usage: codex_pk.sh <prompt-file> [output-file]}"
 OUT_FILE="${2:-/tmp/codex-pk-$$.out}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-STALL_SECS="${CODEX_STALL_SECS:-120}"
-MAX_SECS="${CODEX_MAX_SECS:-420}"
-ATTEMPTS="${CODEX_ATTEMPTS:-2}"
+# Tightened 2026-08-04: the `< /dev/null` fix below removed the stdin-EOF hang at its root, so a
+# real run now streams within seconds. Treat a hang as "Codex unavailable" and fall back FAST
+# rather than burning the review budget: 1 attempt (no retry storm), 60s no-output = hung, 300s
+# hard cap. Worst case ~5 min (was ~14: 2×420s). Override via env for a deliberately slow run.
+STALL_SECS="${CODEX_STALL_SECS:-60}"
+MAX_SECS="${CODEX_MAX_SECS:-300}"
+ATTEMPTS="${CODEX_ATTEMPTS:-1}"
 
 [ -f "$PROMPT_FILE" ] || { echo "ERROR: prompt file not found: $PROMPT_FILE" >&2; exit 1; }
 
