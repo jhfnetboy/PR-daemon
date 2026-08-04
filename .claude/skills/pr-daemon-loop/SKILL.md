@@ -137,6 +137,11 @@ python3 /Users/jason/Dev/tools/PR-Daemon/scripts/poll_prs.py --sync --max 200
 python3 /Users/jason/Dev/tools/PR-Daemon/scripts/poll_prs.py --repo OWNER/REPO --sync --max 50
 ```
 Output: `total_open`, `sync` counts (inserted/updated/closed), and the review `queue`.
+
+**Before starting each PR, stamp the clock** — Step 7 records how long the review actually took:
+```bash
+STARTED_AT=$(date -Iseconds)     # keep this per-PR; do NOT reuse across PRs in one cycle
+```
 The user may pass a repo via `/pr-daemon-loop OWNER/REPO` — honor it.
 
 ## Step 2 — Get & compress the diff (Sonnet executor)
@@ -432,9 +437,16 @@ Always use `post_pr_review.sh` (PAT mode, no account switching). Never `gh pr re
 # --useful-findings: count confirmed by Opus R2
 # --false-positives: count rejected by Opus R2
 # --misses: count R1b security findings NOT in R1a (unique security coverage)
+# --review-rounds / --started-at / --finished-at: MANDATORY cost tracking (user request 2026-08-04).
+#   STARTED_AT was captured at Step 1 (`date -Iseconds`, before touching the PR); FINISHED_AT is
+#   `date -Iseconds` right after post_pr_review.sh returned. duration_seconds is derived from the
+#   pair — pass --duration-seconds only when you have a measured value but no timestamps.
+#   ⚠️ Never guess these. If a timestamp genuinely wasn't captured, omit the flags (store NULL)
+#   rather than invent one — a fabricated duration poisons the v3-vs-v4 comparison it exists for.
 python3 /Users/jason/Dev/tools/PR-Daemon/scripts/model_eval_db.py record-run \
   --owner OWNER --repo REPO --pr-number N --head-oid HEAD \
   --score SCORE --verdict VERDICT \
+  --review-rounds ROUNDS --started-at STARTED_AT --finished-at FINISHED_AT \
   --useful-findings "R1a:N/M confirmed; R1b added K unique security findings" \
   --false-positives "R1a: X rejected by Opus R2" \
   --misses "Opus R2 independent found Y new; Codex missed Z"

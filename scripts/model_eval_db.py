@@ -7,6 +7,7 @@ import argparse
 import json
 import sqlite3
 import sys
+from datetime import datetime
 from pathlib import Path
 
 
@@ -88,6 +89,11 @@ RUN_EXTRA_COLUMNS = {
     "fallback_switched": "INTEGER",
     "codex_override": "INTEGER",
     "codex_only_findings": "INTEGER",
+    # 每次 review 的耗时与轮次 —— 用来横向比较 pipeline 版本的成本/收益。
+    "review_rounds": "INTEGER",      # 实际跑完的轮数(v4 = 2 或 4)
+    "duration_seconds": "INTEGER",   # 从开审到 post 完成的墙钟秒数
+    "started_at": "TEXT",            # ISO8601,开审时刻
+    "finished_at": "TEXT",           # ISO8601,post 完成时刻
 }
 
 
@@ -105,6 +111,25 @@ def connect(db_path: str) -> sqlite3.Connection:
         if column_name not in existing_columns:
             conn.execute(f"ALTER TABLE model_review_runs ADD COLUMN {column_name} {column_type}")
     return conn
+
+
+def compute_duration_seconds(started_at: str, finished_at: str) -> int | None:
+    """由 ISO8601 起止时刻算墙钟秒数;任一格式非法或倒序则返回 None(宁可不记也不记错)。"""
+    def parse(value: str) -> datetime | None:
+        text = value.strip().replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(text)
+        except ValueError:
+            return None
+
+    start, end = parse(started_at), parse(finished_at)
+    if start is None or end is None:
+        return None
+    # 一头带时区一头不带会直接抛 TypeError —— 统一按 naive 比,避免记录流程被打断。
+    if (start.tzinfo is None) != (end.tzinfo is None):
+        start, end = start.replace(tzinfo=None), end.replace(tzinfo=None)
+    delta = int((end - start).total_seconds())
+    return delta if delta >= 0 else None
 
 
 def parse_boolish(value: str) -> int | None:
@@ -278,6 +303,10 @@ def cmd_record_run(args: argparse.Namespace) -> int:
     codex_only_findings = args.codex_only_findings
     if codex_only_findings is None:
         codex_only_findings = infer_codex_only_findings(args.misses)
+    # 只给了起止时刻就自己算耗时(显式 --duration-seconds 优先)。
+    duration_seconds = args.duration_seconds
+    if duration_seconds is None and args.started_at and args.finished_at:
+        duration_seconds = compute_duration_seconds(args.started_at, args.finished_at)
     with connect(args.db) as conn:
         cursor = conn.execute(
             """
@@ -286,9 +315,10 @@ def cmd_record_run(args: argparse.Namespace) -> int:
                 provider_base_url, thinking_mode, reasoning_effort, fallback_switched, local_review_path,
                 score, verdict, summary, useful_findings, false_positives, misses, codex_override, codex_only_findings,
                 prompt_gaps, prior_improvements_applied, prior_improvement_evaluation,
-                next_prompt_improvements, codex_adjudication, verification
+                next_prompt_improvements, codex_adjudication, verification,
+                review_rounds, duration_seconds, started_at, finished_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 args.owner,
@@ -317,6 +347,10 @@ def cmd_record_run(args: argparse.Namespace) -> int:
                 "\n".join(next_items),
                 args.codex_adjudication,
                 args.verification,
+                args.review_rounds,
+                duration_seconds,
+                args.started_at,
+                args.finished_at,
             ),
         )
         run_id = cursor.lastrowid
@@ -395,7 +429,8 @@ def cmd_scorecard(args: argparse.Namespace) -> int:
         runs = conn.execute(
             """
             SELECT id, created_at, head_oid, provider, model, local_review_path, fallback_switched,
-                   score, verdict, codex_override, codex_only_findings, prior_improvement_evaluation
+                   score, verdict, codex_override, codex_only_findings, prior_improvement_evaluation,
+                   review_rounds, duration_seconds
             FROM model_review_runs
             WHERE owner = ? AND repo = ? AND pr_number = ?
             ORDER BY id DESC
@@ -434,6 +469,14 @@ def cmd_scorecard(args: argparse.Namespace) -> int:
     print(f"recent_score_avg: {sum(scores) / len(scores):.2f}")
     print(f"recent_score_min: {min(scores):.2f}")
     print(f"recent_score_max: {max(scores):.2f}")
+    # 耗时/轮次:只统计真填了的行,老数据是 NULL 不能当 0 拉低均值。
+    durations = [int(row["duration_seconds"]) for row in runs if row["duration_seconds"] is not None]
+    rounds = [int(row["review_rounds"]) for row in runs if row["review_rounds"] is not None]
+    if durations:
+        print(f"recent_duration_avg_min: {sum(durations) / len(durations) / 60:.1f}")
+        print(f"recent_duration_range_min: {min(durations) / 60:.1f}–{max(durations) / 60:.1f}")
+    if rounds:
+        print(f"recent_rounds: {'/'.join(str(r) for r in rounds)} (avg {sum(rounds) / len(rounds):.1f})")
     provider_counts: dict[str, int] = {}
     provider_scores: dict[str, list[float]] = {}
     fallback_true = 0
@@ -640,6 +683,10 @@ def build_parser() -> argparse.ArgumentParser:
     record_parser.add_argument("--fallback-switched", type=int, choices=[0, 1], default=None)
     record_parser.add_argument("--codex-override", type=int, choices=[0, 1], default=None)
     record_parser.add_argument("--codex-only-findings", type=int, choices=[0, 1], default=None)
+    record_parser.add_argument("--review-rounds", type=int, default=None, help="实际跑完的轮数(v4 pipeline = 2 或 4)")
+    record_parser.add_argument("--duration-seconds", type=int, default=None, help="本次 review 墙钟耗时(秒)")
+    record_parser.add_argument("--started-at", default="", help="开审时刻 ISO8601")
+    record_parser.add_argument("--finished-at", default="", help="post 完成时刻 ISO8601")
     record_parser.add_argument("--local-review-path", default="")
     record_parser.add_argument("--score", type=float, required=True)
     record_parser.add_argument("--verdict", default="")
