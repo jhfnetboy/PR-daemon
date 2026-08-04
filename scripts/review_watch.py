@@ -823,6 +823,28 @@ def process_queue(conn: sqlite3.Connection, args: argparse.Namespace, current_re
             break
         state = str(viewed.get("state") or "")
         if state == "OPEN":
+            # Also make sure the recorded head is still the real one. The queue row is written by
+            # the periodic scan, which may be several minutes stale — and `refresh_from_remote`
+            # is skipped entirely while the queue is non-empty. Reviewing an outdated head burns a
+            # full cycle producing findings the author already fixed, and posts a misleading
+            # CHANGES_REQUESTED against code that no longer exists. Observed on Brood#36: the
+            # reviewer launched on b693c6d minutes after 7288916 was pushed.
+            live_head = str(viewed.get("headRefOid") or "")
+            if live_head and live_head != str(candidate["head_oid"] or ""):
+                print(
+                    f"head_moved {repo}#{number} {str(candidate['head_oid'])[:7]} → {live_head[:7]}; "
+                    "re-syncing before review"
+                )
+                # Re-upsert from the live view so head_oid, status and the prompt all describe the
+                # same commit, then take the refreshed row.
+                upsert_pr(conn, {"repo": repo, "number": number})
+                conn.commit()
+                refreshed = conn.execute(
+                    "SELECT * FROM pr_watch_targets WHERE repo = ? AND pr_number = ?",
+                    (repo, number),
+                ).fetchone()
+                if refreshed is not None:
+                    candidate = refreshed
             row = candidate
             break
         # Settled since we last saw it — record the real state so it drops out of the queue for good.
