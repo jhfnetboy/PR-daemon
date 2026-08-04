@@ -1,6 +1,6 @@
 ---
 name: pr
-description: PR review + scan-scope management. Subcommands: `$pr list` shows the scan scope (default 8 slots + pinned extras), `$pr add/remove <repo>` pins/unpins a repo, `$pr OWNER/REPO[#N]` reviews one repo/PR, bare `$pr` runs the full 24/7 autonomous review loop (v4). Sonnet=pure executor, DeepSeek=dual-pass R1 (full+security parallel), Opus=R2 strategic independent reviewer + final verdict, Codex=R3 adversarial PK against Opus findings. Evaluate vs v3 after each PR.
+description: "PR review + scan-scope management. Subcommands: `$pr list` shows the scan scope (default 8 slots + pinned extras), `$pr add/remove <repo>` pins/unpins a repo, `$pr OWNER/REPO[#N]` reviews one repo/PR, bare `$pr` runs the full 24/7 autonomous review loop (v4). Sonnet=pure executor, DeepSeek=dual-pass R1 (full+security parallel), Opus=R2 strategic independent reviewer + final verdict, Codex=R3 adversarial PK against Opus findings. Evaluate vs v3 after each PR."
 origin: pr-daemon
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: pr-fix
-description: Fix and merge PRs across two categories — (1) jhfnetboy's own PRs with RC/comments: fix code, self-review, push, loop with pr until APPROVE; (2) Bot PRs (dependabot/renovate): inline review, merge if clean, report to user if RC. Three-tier escalation for human PRs. Triggered by "$pr-fix", "$pr-fix OWNER/REPO", or "$pr-fix OWNER/REPO#N".
+description: "Fix and merge PRs across two categories — (1) jhfnetboy's own PRs with RC/comments: fix code, self-review, push, loop with pr until APPROVE; (2) Bot PRs (dependabot/renovate): inline review, merge if clean, report to user if RC. Three-tier escalation for human PRs. Triggered by \"$pr-fix\", \"$pr-fix OWNER/REPO\", or \"$pr-fix OWNER/REPO#N\"."
 origin: pr-daemon
 ---
 
