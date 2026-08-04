@@ -366,17 +366,25 @@ def refresh_review_state(conn: sqlite3.Connection, repo: str, pr_number: int) ->
     # Record the head the review was ACTUALLY posted on — NOT blindly the current PR head — so a
     # phantom rc=0 run (didn't post) leaves last_reviewed at the old SHA → PR stays needs_review.
     review_commit = latest_clestons_review_commit(repo, pr_number)
-    if review_commit is None:
-        # REST verification FAILED (transient) — keep the old behavior (head_oid) rather than
-        # blanking last_reviewed, which would re-review an already-verdicted PR into a loop.
-        reviewed_head = head_oid
-    elif review_commit == "" and clestons_state in ("APPROVED", "CHANGES_REQUESTED", "COMMENTED"):
-        # view_pr already saw a clestons verdict but the reviews REST list lagged (eventual
-        # consistency) — trust that it posted at the current head; don't re-review (would duplicate).
-        reviewed_head = head_oid
+    # ONLY write this column when we have positive evidence of the commit a review landed on.
+    # Stamping the CURRENT head as a fallback is what caused a permanent stall: after the author
+    # pushes a fix, this function runs again; a transient REST failure (or lag) then records the
+    # NEW head as "already reviewed", so upsert_pr's `last_reviewed != head → needs_review` test
+    # can never fire again and the PR is never re-reviewed. (Real case: Brood#34 — review posted
+    # on 24da4fc, fix pushed as c0d25e7, DB claimed c0d25e7 was reviewed.)
+    #
+    # Preserving the previous value is strictly safer than either alternative: it cannot create
+    # the old re-review loop (if the PR really was reviewed at an unchanged head, the preserved
+    # SHA still equals head → no re-review), and it cannot fake coverage of a head nobody read.
+    # Cost: during the brief REST-lag window right after a review posts, the stale SHA may trigger
+    # one duplicate review. A duplicate is recoverable; a silent permanent stall is not.
+    reviewed_head: str | None
+    if review_commit:
+        reviewed_head = review_commit            # verified SHA — the only case we record
+    elif review_commit == "":
+        reviewed_head = None                     # VERIFIED no review yet → leave column untouched
     else:
-        # real posted commit, or "" = VERIFIED no review yet (genuine phantom) → stays needs_review.
-        reviewed_head = review_commit
+        reviewed_head = None                     # verification failed → leave column untouched
 
     if state != "OPEN":
         status = state.lower() or "closed"
@@ -389,12 +397,14 @@ def refresh_review_state(conn: sqlite3.Connection, repo: str, pr_number: int) ->
     else:
         status = "prompt_ready"
 
+    # COALESCE(?, last_reviewed_head_oid): passing NULL keeps whatever is already recorded, so an
+    # unverifiable cycle is a no-op on this column instead of overwriting it with the current head.
     conn.execute(
         """
         UPDATE pr_watch_targets
         SET head_oid = ?,
             review_decision = ?,
-            last_reviewed_head_oid = ?,
+            last_reviewed_head_oid = COALESCE(?, last_reviewed_head_oid),
             last_review_event = ?,
             last_reviewed_at = CURRENT_TIMESTAMP,
             last_seen_at = CURRENT_TIMESTAMP,
