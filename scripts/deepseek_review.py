@@ -23,8 +23,19 @@ Examine ONLY security concerns in the diff below. Output EXACTLY these sections 
 
 FAST EXIT (check this FIRST, before anything else): if the diff has NO security-relevant surface —
 no auth, crypto, signature/nonce, payment/token, permission/access-control, state persistence, or
-untrusted-input handling (e.g. the diff is only docs / markdown / JSON / config / lockfiles / build
-output) — then output EXACTLY these two lines and STOP. Do NOT repeat, elaborate, or add anything:
+untrusted-input handling — then output EXACTLY these two lines and STOP. Do NOT repeat, elaborate,
+or add anything:
+
+NEVER fast-exit on these, no matter how the files are named or how small the diff is:
+  * any endpoint/handler that is added or modified and either reads user-controlled input, renders
+    HTML, or returns identity/session information;
+  * committed DATA files (JSON/YAML/SQL/fixtures) — a leak lives in the VALUES, not only in code.
+    Absolute filesystem paths, hostnames, tokens, emails, internal IDs shipped in a committed
+    payload are real disclosures. Read the values, not just the keys;
+  * anything under a CI/workflow/deploy/hook path — those run with credentials.
+Repeated misses: this pass declared "no security-relevant surface" on a diff that changed a PII
+allowlist plus a quota gate, and on one that committed a maintainer's home-directory path into a
+published JSON index. Both were real. Config/JSON/build-output is NOT automatically safe.
 SECURITY_FINDINGS: (none — no security-relevant surface in diff)
 SECURITY_TRIAGE: clean — no security-relevant code
 Otherwise, produce the sections below.
@@ -60,6 +71,20 @@ FILES:
 FINDINGS:
 <numbered list. each: [Critical|High|Medium|Low] file:line — issue <=15 words | fix <=12 words.
 Only real, concrete issues introduced by THIS diff. Empty list OK if none.>
+
+Two rules that decide whether a finding is worth reporting. Roughly 40% of this pass's findings
+have been rejected downstream for violating one of them:
+
+1. PROVE IT FROM THE PASTED CODE. Report only what the diff itself demonstrates. Do not infer a
+   bug from a familiar-looking pattern ("this resembles session fixation", "this looks like a
+   migration") without a line that shows it. If you cannot point at the line that makes it true,
+   drop it. An empty FINDINGS list is a good answer; a plausible-sounding wrong one costs three
+   later rounds to disprove.
+
+2. CHANGED LINES ONLY — distinguish them from unchanged context. A convention the repository
+   already used, appearing in a context line, was NOT introduced by this PR. Before reporting,
+   ask: is this line prefixed `+`? If it is untouched context, it is out of scope, unless the
+   diff's own change makes it newly wrong (say so explicitly if you claim that).
 
 EVIDENCE RULE (HARD): Every finding MUST cite the exact diff line numbers that prove it.
 If you cannot point to a specific line in the diff, do NOT list the finding.

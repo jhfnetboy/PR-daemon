@@ -17,20 +17,22 @@ export PR_DAEMON_DRY_RUN="${PR_DAEMON_DRY_RUN:-0}"
 export PR_DAEMON_MAX_REVIEWS_PER_CYCLE="${PR_DAEMON_MAX_REVIEWS_PER_CYCLE:-3}"
 export PR_DAEMON_WATCH_INTERVAL="${PR_DAEMON_WATCH_INTERVAL:-30}"
 export PR_DAEMON_REVIEW_REFRESH_INTERVAL="${PR_DAEMON_REVIEW_REFRESH_INTERVAL:-3600}"
-export PR_DAEMON_ACTIVE_REVIEW_STALE_SECONDS="${PR_DAEMON_ACTIVE_REVIEW_STALE_SECONDS:-14400}"
+# Leave UNSET so review_watch.py's own default (1h) applies. Exporting 14400 here silently
+# overrode that fix: a real 4-round review tops out around 25 min, so a 4h backstop meant one
+# orphaned lock parked the daemon for half a day printing "seen_open_prs: 0".
+# Set this env var explicitly only when deliberately overriding.
+if [ -n "${PR_DAEMON_ACTIVE_REVIEW_STALE_SECONDS:-}" ]; then
+  export PR_DAEMON_ACTIVE_REVIEW_STALE_SECONDS
+fi
 
 case "$ACTION" in
   queue)
-    sqlite3 "$PR_DAEMON_REVIEW_WATCH_DB" '
+    sqlite3 -cmd "PRAGMA busy_timeout=30000" "$PR_DAEMON_REVIEW_WATCH_DB" '
       select "last_full_sync_epoch", coalesce(value, "")
       from pr_watch_meta
       where key = "last_full_sync_epoch";
     ' 2>/dev/null || true
     echo "---"
-    # Counts for LIVE PRs only. closed/merged are settled history (hundreds of rows) and
-    # drowned the handful of statuses that still mean something; draft/WIP aren't ours to
-    # act on. Same standard as review_watch.is_actionable, so this summary and the scan
-    # printout can't tell different stories.
     # Counts for PRs that still need action from someone. Excluded on purpose:
     #   closed/merged  — settled history (hundreds of rows) that drowned the live ones
     #   draft/WIP/PAUSED — author says not ready; we never review these
@@ -41,7 +43,7 @@ case "$ACTION" in
     #                    doesn'"'"'t exist.
     # Same standard as review_watch.is_actionable, so this summary and the scan printout
     # can'"'"'t tell different stories.
-    sqlite3 "$PR_DAEMON_REVIEW_WATCH_DB" '
+    sqlite3 -cmd "PRAGMA busy_timeout=30000" "$PR_DAEMON_REVIEW_WATCH_DB" '
       select status, count(*)
       from pr_watch_targets
       where status in ("needs_review","prompt_ready","reviewing","changes_requested","commented")
@@ -52,7 +54,7 @@ case "$ACTION" in
       order by count(*) desc, status asc;
     ' 2>/dev/null || true
     echo "---"
-    sqlite3 "$PR_DAEMON_REVIEW_WATCH_DB" '
+    sqlite3 -cmd "PRAGMA busy_timeout=30000" "$PR_DAEMON_REVIEW_WATCH_DB" '
       select repo, pr_number, status, substr(head_oid,1,7), coalesce(last_review_event, "")
       from pr_watch_targets
       where status in ("needs_review","prompt_ready","reviewing")

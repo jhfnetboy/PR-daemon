@@ -113,7 +113,8 @@ def get_reviewed_head(repo, pr_number):
     if not STATE_DB.exists():
         return None
     try:
-        conn = sqlite3.connect(STATE_DB)
+        conn = sqlite3.connect(STATE_DB, timeout=30)
+        conn.execute("PRAGMA busy_timeout = 30000")
         row = conn.execute(
             "SELECT last_reviewed_head_oid, status FROM pr_watch_targets WHERE repo=? AND pr_number=?",
             (repo, pr_number),
@@ -194,7 +195,12 @@ def sync_to_sqlite(prs, scope_repo=None):
     genuinely covers every tracked repo in one call.
     """
     review_user = os.environ.get("PR_DAEMON_REVIEW_USER", "clestons")
-    conn = sqlite3.connect(STATE_DB)
+    # The long-running watcher holds write locks; without a busy timeout every concurrent
+    # write here fails instantly with "database is locked" and the state update is simply
+    # LOST — reviews got posted to GitHub while the local record never caught up. Waiting a
+    # few seconds is always better than silently dropping the write.
+    conn = sqlite3.connect(STATE_DB, timeout=30)
+    conn.execute("PRAGMA busy_timeout = 30000")
     conn.execute("CREATE TABLE IF NOT EXISTS pr_watch_targets ("
                  "id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT, pr_number INTEGER, title TEXT, "
                  "url TEXT, author TEXT, head_oid TEXT, state TEXT, review_decision TEXT, "
