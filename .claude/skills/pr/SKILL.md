@@ -511,8 +511,11 @@ python3 /Users/jason/Dev/tools/PR-Daemon/scripts/model_eval_db.py record-run \
   --misses "Opus R2 independent found Y new; Codex missed Z"
 
 # update watcher state
+# ⚠️ last_reviewed_head_oid MUST be the FULL 40-char sha. poll_prs.py compares it against
+#    GitHub's headRefOid (always full); a 7-char short sha never matches, so the PR is queued
+#    as "head-changed" forever and the daemon re-reviews the same commit every cycle.
 sqlite3 "$PR_DAEMON_STATE_DIR/pr-watch.sqlite" \
-  "UPDATE pr_watch_targets SET last_reviewed_head_oid='HEAD', status='STATUS', \
+  "UPDATE pr_watch_targets SET last_reviewed_head_oid='FULL_40_CHAR_HEAD', status='STATUS', \
    last_reviewed_at=CURRENT_TIMESTAMP, review_decision='VERDICT' WHERE repo='OWNER/REPO' AND pr_number=N;"
 
 # token cost — running total across all reviews (per-PR figures already went into model_review_runs above)
