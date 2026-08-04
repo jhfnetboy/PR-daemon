@@ -150,7 +150,10 @@ if [ -x "$FOCUS_SCRIPT" ] && [ "${PR_DAEMON_SKIP_FOCUS_REFRESH:-0}" != "1" ]; th
   ( sleep "$FOCUS_TIMEOUT"; kill -0 "$_focus_pid" 2>/dev/null && kill "$_focus_pid" 2>/dev/null ) &
   _focus_watch=$!
   if wait "$_focus_pid" 2>/dev/null; then _focus_rc=0; else _focus_rc=$?; fi
-  kill "$_focus_watch" 2>/dev/null; wait "$_focus_watch" 2>/dev/null
+  # `|| true` is REQUIRED under `set -e`: waiting on the just-killed watchdog returns 143,
+  # which would otherwise abort the script HERE — after the refresh but BEFORE launching the
+  # watcher, i.e. a silent daemon-never-starts regression. Guard both kill and wait.
+  kill "$_focus_watch" 2>/dev/null || true; wait "$_focus_watch" 2>/dev/null || true
   if [ "$_focus_rc" -eq 0 ]; then
     echo "scan focus updated → $(grep -vcE '^\s*#|^\s*$' "$HOME/.config/prbot/repos.conf" 2>/dev/null) repos"
   else
