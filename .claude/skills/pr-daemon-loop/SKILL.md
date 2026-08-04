@@ -46,6 +46,25 @@ origin: pr-daemon
 > flash missed entirely), plus, when something concrete comes to mind, a one-line suggestion for how
 > to get more signal out of it next time (tighter prompt, more context, narrower diff scope, etc.).
 
+> ⛔ **ABSOLUTE CONSTRAINT #6 — you are HEADLESS: never end a run by asking a question**
+> You run under `claude --print` from a background daemon. **Nobody reads your output while it runs
+> and nobody can answer you.** A run that ends in a question produces no review, burns the whole
+> ~20-minute cycle, blocks every PR queued behind it, and — since nothing changed — asks the same
+> question again next cycle. That is an infinite loop, not a pause. (Observed: a reviewer stalled on
+> `jhfnetboy/CMIC#142` asking whether an allowlisted personal repo was in scope, after hitting the
+> stale "3 orgs only" line that has now been corrected.)
+>
+> On ambiguity, missing context, or rules that contradict each other:
+> 1. **Decide it yourself**, precedence: **executed config > this document > memory**. What the
+>    daemon actually runs (`repos.conf`, the scripts) beats what any doc claims about it.
+> 2. **Deliver the review anyway**, and record the call in a short `## Assumptions` section: what
+>    was ambiguous, how you resolved it, why.
+> 3. If a doc looks stale or self-contradicting, say so **in that same section** — a note inside a
+>    delivered review reaches the maintainer; a question that halts the run reaches nobody.
+>
+> The only acceptable no-verdict outcome is a hard technical failure (API down, diff unfetchable),
+> and even then say what failed. **Never trade a verdict for a question.**
+
 ## Roles & Models (v4 division)
 
 | Role | Model | Job | Judgment? |
@@ -556,7 +575,10 @@ python3 /Users/jason/Dev/tools/PR-Daemon/scripts/triage_db.py report
 - **Security-sensitive PRs always go 4-round** — no downgrade.
 - **Never COMMENT-limbo** — always APPROVE or REQUEST_CHANGES.
 - **Never `gh pr review` directly** — always `post_pr_review.sh`.
-- **3 orgs only** — never personal PRs.
+- **Scope = `~/.config/prbot/repos.conf`** — review iff the repo is listed there. That file is the
+  allowlist and it DOES include individually added personal repos (e.g. `jhfnetboy/CMIC`); see
+  ABSOLUTE CONSTRAINT #4. (This line used to read "3 orgs only — never personal PRs", which
+  contradicted constraint #4 and made a reviewer stop mid-run to ask which one to obey.)
 - **Always score R1a+R1b separately** — the dual-pass split is the key v4 innovation to measure.
 - **Codex gets targeted hunks, NOT full diff** — ±20 lines per Opus-confirmed Medium+ finding.
 - **Opus R4 always gets full compressed diff** — missed-finding scan requires full context.
