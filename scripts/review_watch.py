@@ -919,7 +919,12 @@ def main() -> int:
     parser.add_argument(
         "--active-review-stale-seconds",
         type=int,
-        default=int(os.environ.get("PR_DAEMON_ACTIVE_REVIEW_STALE_SECONDS", "14400")),
+        # 1h, was 4h. This is the backstop for a review whose process died WITHOUT the start-time
+        # lock cleanup catching it (i.e. the watcher itself kept running). A real 4-round review
+        # tops out well under this: codex_pk caps R3 at 360s and the other rounds are minutes, so
+        # ~15-25min is the realistic worst case. At 4h a single orphaned lock silently parked the
+        # whole daemon for half a day — printing `seen_open_prs: 0` while reviewing nothing.
+        default=int(os.environ.get("PR_DAEMON_ACTIVE_REVIEW_STALE_SECONDS", "3600")),
         help="Treat current-review.json older than this as stale and clear it",
     )
     args = parser.parse_args()

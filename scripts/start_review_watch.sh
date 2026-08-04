@@ -133,6 +133,20 @@ if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
   exit 0
 fi
 
+# --- clear any orphaned active-review lock before launching ---
+# current-review.json marks "a review is in flight, don't start another". It is written by the
+# watcher and removed when that review finishes — so if we are STARTING, any lock present is by
+# definition an orphan: the process that owned it is gone (crashed, killed, or restarted mid-
+# review). Leaving it behind makes the fresh watcher refuse all queue work until the staleness
+# timeout expires, which is hours away — it just prints `active_review_block ... seen_open_prs: 0`
+# on every cycle and reviews nothing. Observed twice: a `watch.sh restart` during an in-flight
+# review orphaned the lock and idled the daemon.
+_lock="$STATE_DIR/current-review.json"
+if [ -f "$_lock" ]; then
+  echo "clearing orphaned active-review lock (owner process is gone): $_lock"
+  rm -f "$_lock"
+fi
+
 # --- refresh scan focus BEFORE launching (update repos.conf, then start) ---
 # `daily` = once-per-day IDEMPOTENT recompute of top-N most-recently-pushed + pinned
 # repos. Daemon start is ONE of several callers (pilot status in any repo also calls
