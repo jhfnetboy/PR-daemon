@@ -729,6 +729,11 @@ def should_refresh(conn: sqlite3.Connection, refresh_interval: int) -> bool:
 # is settled or not ours to act on.
 ACTIONABLE_STATUSES = frozenset({"needs_review", "prompt_ready", "reviewing"})
 
+# How many already-settled queue rows to skip past in one cycle before giving up. Each skip costs
+# one `gh pr view`; the cap keeps a large backlog of stale rows from eating the whole cycle in
+# verification calls. Whatever is left gets cleaned up on subsequent cycles.
+MAX_STALE_SKIPS = 5
+
 # Title markers the author uses to say "not ready, don't review" — same list the review
 # queue filters on (see queue_count / next_queue_item). Kept in one place so the scan
 # printout and the queue can never disagree about what counts as reviewable.
@@ -794,7 +799,41 @@ def refresh_from_remote(conn: sqlite3.Connection, args: argparse.Namespace, scop
 
 
 def process_queue(conn: sqlite3.Connection, args: argparse.Namespace, current_review: Path) -> int:
-    row = next_queue_item(conn)
+    # Confirm the PR is still open before spending a review on it. The scan only ever returns OPEN
+    # PRs, so a row whose PR was merged or closed afterwards is never updated again and sits in the
+    # queue forever at its last-known state — and this function used to go straight from "row" to
+    # "launch reviewer", burning a full ~20-minute review on a PR that no longer exists, and
+    # delaying every real PR behind it. Verifying costs one `gh pr view`.
+    #
+    # Skip past stale rows rather than returning: one merged PR at the head of the queue must not
+    # cost the whole cycle. Bounded so a burst of stale rows can't spin here indefinitely.
+    row = None
+    for _ in range(MAX_STALE_SKIPS):
+        candidate = next_queue_item(conn)
+        if candidate is None:
+            return 0
+        repo, number = candidate["repo"], candidate["pr_number"]
+        try:
+            viewed = view_pr(repo, number)
+        except Exception as exc:
+            # Can't verify (transient API failure) — proceed rather than stall the queue. A wasted
+            # review is recoverable; refusing to review anything until GitHub answers is not.
+            print(f"queue_state_check_failed {repo}#{number}: {exc}", file=sys.stderr)
+            row = candidate
+            break
+        state = str(viewed.get("state") or "")
+        if state == "OPEN":
+            row = candidate
+            break
+        # Settled since we last saw it — record the real state so it drops out of the queue for good.
+        conn.execute(
+            "UPDATE pr_watch_targets SET state = ?, status = ?, last_seen_at = CURRENT_TIMESTAMP "
+            "WHERE repo = ? AND pr_number = ?",
+            (state, state.lower() or "closed", repo, number),
+        )
+        conn.commit()
+        print(f"skip_settled {repo}#{number} state={state} (no longer open; dropped from queue)")
+
     if row is None:
         return 0
 
