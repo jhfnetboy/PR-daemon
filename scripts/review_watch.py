@@ -798,6 +798,58 @@ def refresh_from_remote(conn: sqlite3.Connection, args: argparse.Namespace, scop
     return seen
 
 
+def repair_false_reviewed(conn: sqlite3.Connection) -> int:
+    """Un-stick PRs the DB believes were reviewed at their current head but never actually were.
+
+    `last_reviewed_head_oid == head_oid` is what keeps a PR out of the queue. If that value was
+    ever written without a real review behind it (the old refresh_review_state stamped the CURRENT
+    head whenever REST verification was inconclusive), the PR silently drops out of the queue
+    FOREVER — no error, no log line, it simply never gets reviewed. Found in the wild:
+    AirAccount#195/#196 sat "reviewed" with zero reviews on GitHub.
+
+    A row is suspect when it claims a reviewed head but has no recorded review event. Confirm
+    against GitHub before touching anything — a review that exists but wasn't recorded locally must
+    NOT be re-run — then clear the false stamp so the normal queue logic picks it up again.
+
+    Returns how many rows were repaired. Cheap: the suspect set is normally empty.
+    """
+    suspects = conn.execute(
+        """
+        SELECT repo, pr_number FROM pr_watch_targets
+        WHERE state = 'OPEN' AND is_draft = 0
+          AND last_reviewed_head_oid IS NOT NULL
+          AND last_reviewed_head_oid = head_oid
+          AND (last_review_event IS NULL OR last_review_event = '')
+          AND title NOT LIKE '%WIP%' AND title NOT LIKE '%PAUSED%'
+        """
+    ).fetchall()
+
+    repaired = 0
+    for s in suspects:
+        repo, number = s["repo"], s["pr_number"]
+        commit = latest_clestons_review_commit(repo, number)
+        if commit is None:
+            continue                      # couldn't verify — leave it alone, retry next cycle
+        if commit != "":
+            # A review DOES exist; the local record was merely missing. Write the truth instead of
+            # re-reviewing, so this repair can never cause duplicate reviews.
+            conn.execute(
+                "UPDATE pr_watch_targets SET last_reviewed_head_oid = ? WHERE repo = ? AND pr_number = ?",
+                (commit, repo, number),
+            )
+            continue
+        conn.execute(
+            "UPDATE pr_watch_targets SET last_reviewed_head_oid = NULL, status = 'needs_review' "
+            "WHERE repo = ? AND pr_number = ?",
+            (repo, number),
+        )
+        repaired += 1
+        print(f"repaired_false_reviewed {repo}#{number} (marked reviewed but GitHub has no review)")
+    if suspects:
+        conn.commit()
+    return repaired
+
+
 def process_queue(conn: sqlite3.Connection, args: argparse.Namespace, current_review: Path) -> int:
     # Confirm the PR is still open before spending a review on it. The scan only ever returns OPEN
     # PRs, so a row whose PR was merged or closed afterwards is never updated again and sits in the
@@ -943,6 +995,11 @@ def scan(args: argparse.Namespace) -> int:
                 loop_state="cleared_stale_active_review",
                 active_review_age_seconds=round(age_seconds, 1),
             )
+        # Self-heal falsely-"reviewed" rows before deciding there is nothing to do. Without this,
+        # a single bad stamp removes a PR from the queue permanently and silently — the failure
+        # looks exactly like "no work pending", which is why it went unnoticed for days.
+        repair_false_reviewed(conn)
+
         if queue_count(conn) == 0 or should_refresh(conn, args.refresh_interval):
             seen = refresh_from_remote(conn, args, scopes)
             write_watcher_state(watcher_state, loop_state="refreshed", seen_open_prs=seen)
