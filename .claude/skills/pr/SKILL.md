@@ -174,6 +174,25 @@ Output: `total_open`, `sync` counts (inserted/updated/closed), and the review `q
 ```bash
 STARTED_AT=$(date -Iseconds)     # keep this per-PR; do NOT reuse across PRs in one cycle
 ```
+Stamp each round as it starts/ends too (`date +%s` around R1a/R1b, verify, R2, R3, R4, post) — Step 7
+records them as `--round-timings`. Measured 2026-08-04: R3 26% / R2 24% / verify 21% / R4 20% of wall
+clock, R1a+R1b only 8.6%. That is WHY the gate in Step 5b matters more than any per-round speedup.
+
+### Cross-PR pipelining (added 2026-08-05, user-approved)
+
+While PR N sits in a judgment round (R2/R3/R4 are minutes of pure waiting), prepare PR N+1:
+`gh pr diff` → `compress_diff.py` → R1a/R1b in the background. Saves ~6-10% of wall clock — real
+but modest, because the three judgment rounds are serially dependent and cannot overlap.
+
+> ⛔ **Hard limit: exactly ONE PR may be in a judgment stage at any moment.** Overlap ONLY the cheap
+> prep (fetch / compress / R1). The one real risk here is attribution — two PRs' findings live in the
+> same context and a finding gets written into the wrong PR's comment. Keeping the second PR at
+> "files on disk, nothing to judge" makes that structurally impossible. Never run two R2s, two R3s,
+> or an R2 and an R4 concurrently, however tempting the wall-clock math looks.
+
+Also: re-check the prepped PR's head SHA immediately before entering ITS judgment stage — if new
+commits landed while PR N was under review, the prepped diff is stale; re-prep (it is cheap).
+A prep failure for PR N+1 must NOT derail PR N: log a warning and re-run it inline when its turn comes.
 The user may pass a repo via `/pr OWNER/REPO` — honor it.
 
 ## Step 2 — Get & compress the diff (Sonnet executor)
@@ -486,6 +505,7 @@ python3 /Users/jason/Dev/tools/PR-Daemon/scripts/model_eval_db.py record-run \
   --review-rounds ROUNDS --started-at STARTED_AT --finished-at FINISHED_AT \
   --input-tokens INPUT_TOKENS --output-tokens OUTPUT_TOKENS \
   --round-models "R1a/R1b=deepseek-v4-flash; R2/R4=opus; R3=codex" \
+  --round-timings '{"r1a":47,"r1b":52,"verify":238,"r2":274,"r3":300,"r4":228,"post":9}' \
   --useful-findings "R1a:N/M confirmed; R1b added K unique security findings" \
   --false-positives "R1a: X rejected by Opus R2" \
   --misses "Opus R2 independent found Y new; Codex missed Z"

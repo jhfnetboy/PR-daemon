@@ -101,6 +101,11 @@ RUN_EXTRA_COLUMNS = {
     # 每轮各自用了谁。既有的 provider/model 列只记 R1(DeepSeek)，pipeline 是 4 个模型，
     # 光看 provider 无法回答「这次 Opus 跑没跑 / Codex 是不是被 DeepSeek 兜底顶掉了」。
     "round_models": "TEXT",          # 例:R1=deepseek-v4-flash; R2/R4=opus; R3=codex
+    # 分轮耗时/token。整次的 duration_seconds 回答不了「这 20 分钟里谁占的」,而那正是决定
+    # 「要不要砍某一轮 / 值不值得流水线化」的唯一依据。存 JSON 而不是拆成多列:一次 review 是
+    # 一个有 verdict/score 的完整单位,拆成多行后每行都得复制或留空 verdict,反而难查。
+    "round_timings": "TEXT",         # JSON:{"r1a":47,"r1b":52,"verify":238,"r2":255,"r3":312,"r4":141,"post":8}
+    "round_tokens": "TEXT",          # JSON:{"r1a":{"in":16000,"out":900},"r2":{...}} —— 缺的轮直接不写键
 }
 
 
@@ -118,6 +123,26 @@ def connect(db_path: str) -> sqlite3.Connection:
         if column_name not in existing_columns:
             conn.execute(f"ALTER TABLE model_review_runs ADD COLUMN {column_name} {column_type}")
     return conn
+
+
+def validated_round_json(raw: str, flag: str) -> str | None:
+    """空串 → 空串(该轮没测,存 NULL 语义)。合法 JSON 对象 → 原样。其它 → 报错返回 None。
+
+    返回 None 表示「拒收」,调用方据此退出非零 —— 坏 JSON 静默入库后,任何按轮聚合的查询都会
+    悄悄漏掉这一行,那比当场失败难查得多。
+    """
+    text = raw.strip()
+    if not text:
+        return ""
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        print(f"{flag} 不是合法 JSON: {exc}", file=sys.stderr)
+        return None
+    if not isinstance(parsed, dict):
+        print(f"{flag} 必须是 JSON 对象(形如 {{\"r2\": 255}}),收到 {type(parsed).__name__}", file=sys.stderr)
+        return None
+    return text
 
 
 def estimate_cost_usd(input_tokens: int, output_tokens: int) -> float | None:
@@ -332,6 +357,12 @@ def cmd_record_run(args: argparse.Namespace) -> int:
     cost_usd = args.cost_usd
     if cost_usd is None and args.input_tokens is not None and args.output_tokens is not None:
         cost_usd = estimate_cost_usd(args.input_tokens, args.output_tokens)
+    # 分轮数据必须是合法 JSON 对象,否则拒收 —— 存进一串坏字符串,下游查询会静默漏掉这一行,
+    # 比明确报错难查得多。
+    round_timings = validated_round_json(args.round_timings, "--round-timings")
+    round_tokens = validated_round_json(args.round_tokens, "--round-tokens")
+    if round_timings is None or round_tokens is None:
+        return 2
     with connect(args.db) as conn:
         cursor = conn.execute(
             """
@@ -342,9 +373,10 @@ def cmd_record_run(args: argparse.Namespace) -> int:
                 prompt_gaps, prior_improvements_applied, prior_improvement_evaluation,
                 next_prompt_improvements, codex_adjudication, verification,
                 review_rounds, duration_seconds, started_at, finished_at,
-                input_tokens, output_tokens, cost_usd, round_models
+                input_tokens, output_tokens, cost_usd, round_models,
+                round_timings, round_tokens
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 args.owner,
@@ -381,6 +413,8 @@ def cmd_record_run(args: argparse.Namespace) -> int:
                 args.output_tokens,
                 cost_usd,
                 args.round_models,
+                round_timings,
+                round_tokens,
             ),
         )
         run_id = cursor.lastrowid
@@ -448,6 +482,66 @@ def cmd_prior_context(args: argparse.Namespace) -> int:
         print("Improvement items:")
         for row in items:
             print(f"- [{row['status']}] {row['improvement_text']} ({row['evaluation'] or 'not evaluated'})")
+    return 0
+
+
+def cmd_round_profile(args: argparse.Namespace) -> int:
+    """「这 20 分钟到底谁占的」—— 跨 run 聚合 round_timings,回答该不该砍某一轮 / 值不值得流水线化。"""
+    where, params = [], []
+    if args.owner:
+        where.append("owner = ?"); params.append(args.owner)
+    if args.repo:
+        where.append("repo = ?"); params.append(args.repo)
+    if args.rounds is not None:
+        where.append("review_rounds = ?"); params.append(args.rounds)
+    clause = ("WHERE " + " AND ".join(where)) if where else ""
+    with connect(args.db) as conn:
+        rows = conn.execute(
+            f"""
+            SELECT round_timings, duration_seconds, review_rounds, verdict
+            FROM model_review_runs
+            {clause}
+            {'AND' if where else 'WHERE'} round_timings IS NOT NULL AND round_timings != ''
+            ORDER BY id DESC LIMIT ?
+            """,
+            (*params, args.limit),
+        ).fetchall()
+
+    if not rows:
+        print("还没有任何一行记了 round_timings —— 先让 record-run 带上 --round-timings。")
+        return 0
+
+    totals: dict[str, list[float]] = {}
+    wall: list[int] = []
+    for row in rows:
+        try:
+            timings = json.loads(row["round_timings"])
+        except json.JSONDecodeError:
+            continue        # 理论上进不来(写入时已校验),但老数据/手改过的行不该炸掉报表
+        for stage, seconds in timings.items():
+            if isinstance(seconds, (int, float)):
+                totals.setdefault(str(stage), []).append(float(seconds))
+        if row["duration_seconds"] is not None:
+            wall.append(int(row["duration_seconds"]))
+
+    if not totals:
+        print("round_timings 里没有可用的数值字段。")
+        return 0
+
+    measured_total = sum(sum(v) for v in totals.values())
+    print(f"round profile — {len(rows)} runs" + (f" (rounds={args.rounds})" if args.rounds is not None else ""))
+    if wall:
+        print(f"平均墙钟: {sum(wall) / len(wall) / 60:.1f} min/run")
+    print(f"{'阶段':<10} {'次数':>5} {'均值s':>8} {'占比':>7}")
+    for stage, values in sorted(totals.items(), key=lambda kv: -sum(kv[1])):
+        share = sum(values) / measured_total * 100
+        print(f"{stage:<10} {len(values):>5} {sum(values) / len(values):>8.0f} {share:>6.1f}%")
+    if wall:
+        # 有测量的阶段之和 vs 墙钟之和:差值就是没被计时的部分(我自己的思考/工具调用等)
+        unmeasured = sum(wall) - measured_total
+        if unmeasured > 0:
+            print(f"\n未计时部分: {unmeasured / len(rows) / 60:.1f} min/run "
+                  f"({unmeasured / sum(wall) * 100:.0f}% 的墙钟没被任何阶段覆盖)")
     return 0
 
 
@@ -681,6 +775,14 @@ def build_parser() -> argparse.ArgumentParser:
     prior_parser.add_argument("--limit", type=int, default=3)
     prior_parser.set_defaults(func=cmd_prior_context)
 
+    p_round = subparsers.add_parser("round-profile", help="Aggregate per-round timings across runs")
+    add_db_argument(p_round)
+    p_round.add_argument("--owner", default="")
+    p_round.add_argument("--repo", default="")
+    p_round.add_argument("--rounds", type=int, default=None, help="只看 2 轮或 4 轮的")
+    p_round.add_argument("--limit", type=int, default=50)
+    p_round.set_defaults(func=cmd_round_profile)
+
     scorecard_parser = subparsers.add_parser("scorecard", help="Summarize recent model-review quality and open improvement items")
     add_db_argument(scorecard_parser)
     scorecard_parser.add_argument("--owner", required=True)
@@ -729,6 +831,10 @@ def build_parser() -> argparse.ArgumentParser:
                                help="本次 review 成本(USD);不给就按 token_cost.py 的 DeepSeek 价目自动估算")
     record_parser.add_argument("--round-models", default="",
                                help="每轮实际用的模型,例:'R1=deepseek-v4-flash; R2/R4=opus; R3=codex'")
+    record_parser.add_argument("--round-timings", default="",
+                               help='分轮耗时(秒)JSON,例 \'{"r1a":47,"r2":255,"r3":312,"r4":141}\';没测到的轮就别写那个键')
+    record_parser.add_argument("--round-tokens", default="",
+                               help='分轮 token JSON,例 \'{"r2":{"in":97000,"out":4000}}\'')
     record_parser.add_argument("--local-review-path", default="")
     record_parser.add_argument("--score", type=float, required=True)
     record_parser.add_argument("--verdict", default="")
