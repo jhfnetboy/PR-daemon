@@ -94,6 +94,13 @@ RUN_EXTRA_COLUMNS = {
     "duration_seconds": "INTEGER",   # 从开审到 post 完成的墙钟秒数
     "started_at": "TEXT",            # ISO8601,开审时刻
     "finished_at": "TEXT",           # ISO8601,post 完成时刻
+    # token 成本 —— 和 duration/rounds 一起，才能算「每条有效 finding 多少钱」。
+    "input_tokens": "INTEGER",
+    "output_tokens": "INTEGER",
+    "cost_usd": "REAL",
+    # 每轮各自用了谁。既有的 provider/model 列只记 R1(DeepSeek)，pipeline 是 4 个模型，
+    # 光看 provider 无法回答「这次 Opus 跑没跑 / Codex 是不是被 DeepSeek 兜底顶掉了」。
+    "round_models": "TEXT",          # 例:R1=deepseek-v4-flash; R2/R4=opus; R3=codex
 }
 
 
@@ -111,6 +118,20 @@ def connect(db_path: str) -> sqlite3.Connection:
         if column_name not in existing_columns:
             conn.execute(f"ALTER TABLE model_review_runs ADD COLUMN {column_name} {column_type}")
     return conn
+
+
+def estimate_cost_usd(input_tokens: int, output_tokens: int) -> float | None:
+    """按 token_cost.py 的 DeepSeek 价目表估成本(价格只有那一份,不在这里重打)。
+
+    token_cost.py 拿不到(改名/搬走)就返回 None —— 记录流程不该因为估价失败而中断,
+    NULL 也比一个凭空写死的价格强。
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import token_cost                                   # noqa: PLC0415 - 延迟导入,失败可降级
+        return float(token_cost.estimate_cost(input_tokens, output_tokens)["total_cost"])
+    except Exception:
+        return None
 
 
 def compute_duration_seconds(started_at: str, finished_at: str) -> int | None:
@@ -307,6 +328,10 @@ def cmd_record_run(args: argparse.Namespace) -> int:
     duration_seconds = args.duration_seconds
     if duration_seconds is None and args.started_at and args.finished_at:
         duration_seconds = compute_duration_seconds(args.started_at, args.finished_at)
+    # 给了 token 数没给钱 → 用 token_cost.py 的价目表估(单一真源,别在这儿重打一份价格)。
+    cost_usd = args.cost_usd
+    if cost_usd is None and args.input_tokens is not None and args.output_tokens is not None:
+        cost_usd = estimate_cost_usd(args.input_tokens, args.output_tokens)
     with connect(args.db) as conn:
         cursor = conn.execute(
             """
@@ -316,9 +341,10 @@ def cmd_record_run(args: argparse.Namespace) -> int:
                 score, verdict, summary, useful_findings, false_positives, misses, codex_override, codex_only_findings,
                 prompt_gaps, prior_improvements_applied, prior_improvement_evaluation,
                 next_prompt_improvements, codex_adjudication, verification,
-                review_rounds, duration_seconds, started_at, finished_at
+                review_rounds, duration_seconds, started_at, finished_at,
+                input_tokens, output_tokens, cost_usd, round_models
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 args.owner,
@@ -351,6 +377,10 @@ def cmd_record_run(args: argparse.Namespace) -> int:
                 duration_seconds,
                 args.started_at,
                 args.finished_at,
+                args.input_tokens,
+                args.output_tokens,
+                cost_usd,
+                args.round_models,
             ),
         )
         run_id = cursor.lastrowid
@@ -430,7 +460,7 @@ def cmd_scorecard(args: argparse.Namespace) -> int:
             """
             SELECT id, created_at, head_oid, provider, model, local_review_path, fallback_switched,
                    score, verdict, codex_override, codex_only_findings, prior_improvement_evaluation,
-                   review_rounds, duration_seconds
+                   review_rounds, duration_seconds, cost_usd, round_models
             FROM model_review_runs
             WHERE owner = ? AND repo = ? AND pr_number = ?
             ORDER BY id DESC
@@ -477,6 +507,12 @@ def cmd_scorecard(args: argparse.Namespace) -> int:
         print(f"recent_duration_range_min: {min(durations) / 60:.1f}–{max(durations) / 60:.1f}")
     if rounds:
         print(f"recent_rounds: {'/'.join(str(r) for r in rounds)} (avg {sum(rounds) / len(rounds):.1f})")
+    costs = [float(row["cost_usd"]) for row in runs if row["cost_usd"] is not None]
+    if costs:
+        print(f"recent_cost_total_usd: {sum(costs):.4f}  (avg {sum(costs) / len(costs):.4f}/run)")
+    round_models = [str(row["round_models"]) for row in runs if row["round_models"]]
+    if round_models:
+        print(f"latest_round_models: {round_models[0]}")
     provider_counts: dict[str, int] = {}
     provider_scores: dict[str, list[float]] = {}
     fallback_true = 0
@@ -687,6 +723,12 @@ def build_parser() -> argparse.ArgumentParser:
     record_parser.add_argument("--duration-seconds", type=int, default=None, help="本次 review 墙钟耗时(秒)")
     record_parser.add_argument("--started-at", default="", help="开审时刻 ISO8601")
     record_parser.add_argument("--finished-at", default="", help="post 完成时刻 ISO8601")
+    record_parser.add_argument("--input-tokens", type=int, default=None, help="本次 review 输入 token")
+    record_parser.add_argument("--output-tokens", type=int, default=None, help="本次 review 输出 token")
+    record_parser.add_argument("--cost-usd", type=float, default=None,
+                               help="本次 review 成本(USD);不给就按 token_cost.py 的 DeepSeek 价目自动估算")
+    record_parser.add_argument("--round-models", default="",
+                               help="每轮实际用的模型,例:'R1=deepseek-v4-flash; R2/R4=opus; R3=codex'")
     record_parser.add_argument("--local-review-path", default="")
     record_parser.add_argument("--score", type=float, required=True)
     record_parser.add_argument("--verdict", default="")

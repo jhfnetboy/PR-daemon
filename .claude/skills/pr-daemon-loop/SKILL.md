@@ -443,10 +443,17 @@ Always use `post_pr_review.sh` (PAT mode, no account switching). Never `gh pr re
 #   pair — pass --duration-seconds only when you have a measured value but no timestamps.
 #   ⚠️ Never guess these. If a timestamp genuinely wasn't captured, omit the flags (store NULL)
 #   rather than invent one — a fabricated duration poisons the v3-vs-v4 comparison it exists for.
+# --input-tokens / --output-tokens: this PR's token spend (cost_usd is derived from token_cost.py's
+#   price table — do NOT pass --cost-usd unless you have a real billed figure). Same rule: unknown → omit.
+# --round-models: what ACTUALLY ran this review, per round. If Codex was quota-blocked and DeepSeek
+#   backstopped R3, write that ("R3=deepseek-pk (codex quota)") — this column exists precisely to
+#   make substitutions visible instead of silently reading as a full 4-model run.
 python3 /Users/jason/Dev/tools/PR-Daemon/scripts/model_eval_db.py record-run \
   --owner OWNER --repo REPO --pr-number N --head-oid HEAD \
   --score SCORE --verdict VERDICT \
   --review-rounds ROUNDS --started-at STARTED_AT --finished-at FINISHED_AT \
+  --input-tokens INPUT_TOKENS --output-tokens OUTPUT_TOKENS \
+  --round-models "R1a/R1b=deepseek-v4-flash; R2/R4=opus; R3=codex" \
   --useful-findings "R1a:N/M confirmed; R1b added K unique security findings" \
   --false-positives "R1a: X rejected by Opus R2" \
   --misses "Opus R2 independent found Y new; Codex missed Z"
@@ -456,7 +463,7 @@ sqlite3 "$PR_DAEMON_STATE_DIR/pr-watch.sqlite" \
   "UPDATE pr_watch_targets SET last_reviewed_head_oid='HEAD', status='STATUS', \
    last_reviewed_at=CURRENT_TIMESTAMP, review_decision='VERDICT' WHERE repo='OWNER/REPO' AND pr_number=N;"
 
-# token cost
+# token cost — running total across all reviews (per-PR figures already went into model_review_runs above)
 python3 /Users/jason/Dev/tools/PR-Daemon/scripts/token_cost.py --add INPUT_TOKENS OUTPUT_TOKENS
 ```
 
