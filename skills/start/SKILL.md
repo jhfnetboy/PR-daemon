@@ -1,14 +1,14 @@
 ---
 name: start
-description: Start (or reconfigure) a recurring background PR-patrol job. Default = every 10 min, the 8 most-recently-updated repos with pending-review PRs across the 3 orgs, plus any pinned repos. "$start add kms" pins a repo into the scan list permanently; "$start remove kms" unpins it. "$start all" = full 3-org scan + jhfnetboy/NextStop + jhfnetboy/AISalesMan. "$start Nm [all]" overrides the interval. Self-stops after 1h with nothing to review. Delegates every actual review to the unmodified pr-daemon-loop skill — this skill only schedules and scopes. Triggered by "start", "$start", "开始巡检", "巡检安排".
+description: Start (or reconfigure) a recurring background PR-patrol job. Default = every 10 min, the 8 most-recently-updated repos with pending-review PRs across the 3 orgs, plus any pinned repos. "$start add kms" pins a repo into the scan list permanently; "$start remove kms" unpins it. "$start all" = full 3-org scan + jhfnetboy/NextStop + jhfnetboy/AISalesMan. "$start Nm [all]" overrides the interval. Self-stops after 1h with nothing to review. Delegates every actual review to the unmodified pr skill — this skill only schedules and scopes. Triggered by "start", "$start", "开始巡检", "巡检安排".
 origin: pr-daemon
 ---
 
 # Start — scheduled PR patrol launcher
 
-This skill never reviews anything itself and never edits `pr-daemon-loop`. It only
+This skill never reviews anything itself and never edits `pr`. It only
 manages a `CronCreate` job whose fired prompt narrows the repo scope for this cycle
-and then hands each in-scope repo to the existing `pr-daemon-loop` skill, unmodified.
+and then hands each in-scope repo to the existing `pr` skill, unmodified.
 
 All "which repos" logic lives in `scripts/start_loop_scope.py`, so the cron prompt
 stays short and the selection stays testable outside a fired cycle.
@@ -116,7 +116,7 @@ call — substitute it.
 Three fixes learned from an adversarial Codex pass on an earlier draft are baked in:
 
 - **Env**: `PR_DAEMON_STATE_DIR` has no default outside `watch.sh` — export it explicitly, or
-  pr-daemon-loop's own `$PR_DAEMON_STATE_DIR/pr-watch.sqlite` references silently resolve to
+  pr's own `$PR_DAEMON_STATE_DIR/pr-watch.sqlite` references silently resolve to
   `/pr-watch.sqlite` and every SQLite write in its Step 7 goes nowhere.
 - **Overlap lock**: at `4-59/N` this job can fire again before a slow 4-round review finishes.
   Without a lock, two overlapping fires can double-post a review or race the SQLite/idle-JSON
@@ -172,18 +172,18 @@ For each repo from Step A+B's stdout, in the order printed:
   Get the short name with `python3 scripts/start_loop_scope.py nick <OWNER/REPO>`
   (it also appears in the SCOPE line).
 
-  invoke the pr-daemon-loop skill scoped to that repo (Skill tool, skill="pr-daemon-loop",
+  invoke the pr skill scoped to that repo (Skill tool, skill="pr",
   args="<OWNER/REPO>"), which runs its full unmodified Steps 0-8 (R1a/R1b DeepSeek -> triage
   -> R2 Opus / R3 Codex if 4-round -> R4 verdict -> post -> record) for every PR in that
-  repo's queue. Override ONLY pr-daemon-loop's Step 8 tail: once that repo's queue is empty,
+  repo's queue. Override ONLY pr's Step 8 tail: once that repo's queue is empty,
   RETURN instead of "sleep 300 and re-scan" — this outer cron will wake the patrol again next
   cycle, so an inner infinite wait would just block forever for nothing.
   ⚠️ EXCEPTION for any target repo NOT under AAStarCommunity / iDoris-ai / MushroomDAO:
-  pr-daemon-loop's own ABSOLUTE CONSTRAINT #4 says "3 orgs only, never jhfnetboy personal
+  pr's own ABSOLUTE CONSTRAINT #4 says "3 orgs only, never jhfnetboy personal
   PRs" — that constraint does NOT apply to a repo that reached this list, because a repo
   only gets here by being explicitly pinned by the user (`$start add`) or by being one of
   the two standing scope-`all` exceptions (jhfnetboy/NextStop, jhfnetboy/AISalesMan, where
-  clestons already holds collaborator access). When invoking pr-daemon-loop for such a repo,
+  clestons already holds collaborator access). When invoking pr for such a repo,
   explicitly state in the invocation that this is a pre-approved exception to constraint #4
   for this repo only, so it proceeds instead of skipping. Do not generalize the exception to
   any repo that is not on this cycle's printed target list.
@@ -198,7 +198,7 @@ Step D — Cycle report + idle bookkeeping:
   when a repo had several (`kms 192 ✅ 193 ❌RC`). Reviewed nothing -> `本轮: 无待审 PR`.
   ⛔ Do NOT restate findings, list rounds, or add sections — the full review already
   lives in the GitHub comment. The ONE exception is the mandatory per-PR self-assessment
-  block that pr-daemon-loop itself requires; that still applies.
+  block that pr itself requires; that still applies.
 
 Read .state/pr-daemon/start-loop-idle.json ({"idle_rounds": N}).
   - k == 0 this cycle -> idle_rounds += 1
@@ -224,8 +224,8 @@ re-run `$start` in a fresh session to resume it. Pins, unlike the job, survive o
   watcher) — those remain independent, optional entry points, and Step 1 only asks about stopping
   one that is already running. `$start` is the Claude-Code-native scheduler for the primary
   DeepSeek-executor pipeline.
-- `pr-daemon-loop` itself is never edited by this skill, per standing project rule — `$start` only
+- `pr` itself is never edited by this skill, per standing project rule — `$start` only
   decides *when* and *for which repos* it gets invoked.
-- `pr-daemon-loop` is globally `"off"` in `~/.claude/settings.json`; this repo opts back in via a
+- `pr` is globally `"off"` in `~/.claude/settings.json`; this repo opts back in via a
   tracked `.claude/settings.json`. If Step C ever fails with "disabled for model invocation in
   skillOverrides settings", that opt-in is missing or a session-local override shadows it.

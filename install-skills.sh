@@ -56,7 +56,7 @@ if [[ "$SCOPE" == "--global" ]]; then
     echo "  export DEEPSEEK_API_KEY=sk-..."
     echo ""
     echo "Launch with:  cd $ROOT && ./run-dpsk-claude.sh"
-    echo "Then say:     \"Use \$pr-daemon-loop to start reviewing PRs\""
+    echo "Then say:     \"Use \$pr to start reviewing PRs\""
   fi
 
 else

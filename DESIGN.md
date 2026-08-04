@@ -1,6 +1,6 @@
 # PR-Daemon 设计文档 — v2 架构（Max 订阅驱动 + 三轮 PK + 智能分流）
 
-> 本文档记录 2026-06 与用户讨论确定的 v2 架构决策。是 `pr-daemon-loop` skill 的设计依据。
+> 本文档记录 2026-06 与用户讨论确定的 v2 架构决策。是 `pr` skill 的设计依据。
 
 ## 一、产品定位
 
@@ -14,8 +14,8 @@ pr-agent（The-PR-Agent/pr-agent, 11.5k⭐）是成熟的独立 Python 服务，
 
 ```
 入口（任选其一）：
-  • 你输入: 用 $pr-daemon-loop 开始   (skill 触发)
-  • 你输入: /pr-daemon-loop            (slash 命令触发)
+  • 你输入: 用 $pr 开始   (skill 触发)
+  • 你输入: /pr            (slash 命令触发)
   • ./run-dpsk-claude.sh               (保留的 DeepSeek 驱动入口，可选)
     │
     └─► Claude Code (Max 订阅, Sonnet 主会话) = 编排大脑，24h 循环
@@ -115,8 +115,8 @@ R1 时 DeepSeek 给分类提案 (trivial / significant)
 
 | 入口 | 用途 |
 |---|---|
-| `用 $pr-daemon-loop 开始` | skill 触发（主推） |
-| `/pr-daemon-loop` | slash 命令触发（等价） |
+| `用 $pr 开始` | skill 触发（主推） |
+| `/pr` | slash 命令触发（等价） |
 | `./run-dpsk-claude.sh` | DeepSeek 驱动 Claude Code（保留，可选） |
 | `$pr-daemon-status` | 实时进度 + token 消耗看板 |
 | `./balance.sh` | DeepSeek + Codex + Claude 余额/用量 |

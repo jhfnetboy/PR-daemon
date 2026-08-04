@@ -27,10 +27,10 @@ All review artifacts go to `reviews/`. Watcher state is in `.state/pr-daemon/`. 
 ./run-dpsk-claude.sh
 
 # Then tell Claude Code:
-# "Use $pr-daemon-loop to start the 24/7 review loop"
+# "Use $pr to start the 24/7 review loop"
 
 # Headless / non-interactive:
-./run-dpsk-claude.sh -p "Use pr-daemon-loop. Start the continuous PR review daemon for jhfnetboy's open PRs across aastar, auraai, and mycelium. Post reviews as clestons. Run until stopped."
+./run-dpsk-claude.sh -p "Use pr. Start the continuous PR review daemon for jhfnetboy's open PRs across aastar, auraai, and mycelium. Post reviews as clestons. Run until stopped."
 
 # Check status while running:
 ./watch.sh queue && ./watch.sh current
@@ -140,7 +140,7 @@ review_watch.py (watcher loop)
 
 | Skill | Invocation | Purpose |
 |-------|-----------|---------|
-| `skills/pr-daemon-loop/SKILL.md` | `$pr-daemon-loop` | Full 24/7 autonomous review loop for Claude Code |
+| `skills/pr/SKILL.md` | `$pr` | Full 24/7 autonomous review loop for Claude Code |
 | `skills/pk-review/SKILL.md` | `$pk-review` | Single PR review with Codex PK challenge |
 | `skills/pk-review/scripts/local_review.py` | CLI | Optional DeepSeek breadth pass, writes `reviews/*-local-review-*.md` |
 

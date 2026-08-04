@@ -1,5 +1,5 @@
 {
   "skillOverrides": {
-    "pr-daemon-loop": "on"
+    "pr": "on"
   }
 }

@@ -1,6 +1,6 @@
 ---
 name: pk-review
-description: Single-PR PK review. The orchestrating model (Claude Code on DeepSeek, or Codex) deep-reviews one PR independently, calls the other CLI as adversarial PK challenger, posts the final verdict via the review account. Use when asked to review a specific PR, or when pr-daemon-loop delegates a single review.
+description: Single-PR PK review. The orchestrating model (Claude Code on DeepSeek, or Codex) deep-reviews one PR independently, calls the other CLI as adversarial PK challenger, posts the final verdict via the review account. Use when asked to review a specific PR, or when pr delegates a single review.
 origin: pr-daemon
 ---
 

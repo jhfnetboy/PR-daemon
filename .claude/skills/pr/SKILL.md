@@ -1,15 +1,47 @@
 ---
-name: pr-daemon-loop
-description: Full 24/7 autonomous PR review loop (v4). Sonnet=pure executor, DeepSeek=dual-pass R1 (full+security parallel), Opus=R2 strategic independent reviewer + final verdict, Codex=R3 adversarial PK against Opus findings. Evaluate vs v3 after each PR.
+name: pr
+description: PR review + scan-scope management. Subcommands: `$pr list` shows the scan scope (default 8 slots + pinned extras), `$pr add/remove <repo>` pins/unpins a repo, `$pr OWNER/REPO[#N]` reviews one repo/PR, bare `$pr` runs the full 24/7 autonomous review loop (v4). Sonnet=pure executor, DeepSeek=dual-pass R1 (full+security parallel), Opus=R2 strategic independent reviewer + final verdict, Codex=R3 adversarial PK against Opus findings. Evaluate vs v3 after each PR.
 origin: pr-daemon
 ---
 
 <!-- ROLLBACK:
-  v4 → v3: cp ~/.claude/skills/pr-daemon-loop/SKILL.md.bak-v3-20260619 ~/.claude/skills/pr-daemon-loop/SKILL.md
-  v3 → v2: cp ~/.claude/skills/pr-daemon-loop/SKILL.md.bak-20260614 ~/.claude/skills/pr-daemon-loop/SKILL.md
+  v4 → v3: cp ~/.claude/skills/pr/SKILL.md.bak-v3-20260619 ~/.claude/skills/pr/SKILL.md
+  v3 → v2: cp ~/.claude/skills/pr/SKILL.md.bak-20260614 ~/.claude/skills/pr/SKILL.md
 -->
 
 # PR Daemon Loop (v4 — Opus strategic R2 + dual DeepSeek + Sonnet executor)
+
+## Invocation — dispatch on the argument FIRST
+
+`$pr` takes an optional subcommand. Check it **before** doing anything else; only the
+no-subcommand forms run the review pipeline below.
+
+| Invocation | Do this |
+|---|---|
+| `$pr list` | Print the scan scope, then **stop** (no review). See below. |
+| `$pr add <name>` / `$pr remove <name>` | Pin/unpin a repo, then **stop**. |
+| `$pr` | Org-scan mode — run the pipeline over the current scan scope. |
+| `$pr OWNER/REPO` | Single-repo mode — every open PR in that repo. |
+| `$pr OWNER/REPO#N` | Single-PR mode. |
+
+```bash
+cd /Users/jason/Dev/tools/PR-Daemon
+export PR_DAEMON_STATE_DIR=/Users/jason/Dev/tools/PR-Daemon/.state/pr-daemon
+
+# $pr list — default slots (8 most-recently-updated repos WITH pending PRs) + pinned extras
+python3 scripts/start_loop_scope.py list
+
+# $pr add kms  /  $pr remove kms  — pins persist in .state/pr-daemon/start-loop-pinned.json
+python3 scripts/start_loop_scope.py pins add kms
+python3 scripts/start_loop_scope.py pins remove kms
+```
+
+Relay the `list` output as-is — it already distinguishes default slots from pinned extras,
+and deliberately shows pins that currently have **no** pending PR (hiding them reads as if
+the pin was dropped). An ambiguous/unknown name on `add` exits non-zero and prints the
+candidates: relay them and stop, **do not pick one for the user**.
+
+> These subcommands only *scope* the patrol; the recurring schedule itself is `$start`'s job.
 
 > ⛔ **ABSOLUTE CONSTRAINT #1 — Review only, NEVER merge**
 > Pure reviewer. NEVER merge any PR regardless of author (human or bot).
@@ -142,7 +174,7 @@ Output: `total_open`, `sync` counts (inserted/updated/closed), and the review `q
 ```bash
 STARTED_AT=$(date -Iseconds)     # keep this per-PR; do NOT reuse across PRs in one cycle
 ```
-The user may pass a repo via `/pr-daemon-loop OWNER/REPO` — honor it.
+The user may pass a repo via `/pr OWNER/REPO` — honor it.
 
 ## Step 2 — Get & compress the diff (Sonnet executor)
 
@@ -549,7 +581,7 @@ python3 /Users/jason/Dev/tools/PR-Daemon/scripts/model_eval_db.py provider-summa
 
 **Rollback trigger:** if DeepSeek false-positive rate doesn't improve after 10 PRs, OR Opus R2 costs make the loop prohibitive, revert:
 ```bash
-cp ~/.claude/skills/pr-daemon-loop/SKILL.md.bak-v3-20260619 ~/.claude/skills/pr-daemon-loop/SKILL.md
+cp ~/.claude/skills/pr/SKILL.md.bak-v3-20260619 ~/.claude/skills/pr/SKILL.md
 ```
 
 ## Triage validation (run periodically)

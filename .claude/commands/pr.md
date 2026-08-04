@@ -3,7 +3,7 @@ description: Start the PR review loop (3-round PK + Opus verdict, 2/4 triage). O
 argument-hint: "[OWNER/REPO] [extra instructions]"
 ---
 
-Start the PR-Daemon review loop by loading the `pr-daemon-loop` skill.
+Start the PR-Daemon review loop by loading the `pr` skill.
 
 User arguments: $ARGUMENTS
 

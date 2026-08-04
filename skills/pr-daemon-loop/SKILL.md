@@ -1,1 +1,0 @@
-../../.claude/skills/pr-daemon-loop/SKILL.md

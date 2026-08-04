@@ -264,10 +264,10 @@ def upsert_pr(conn: sqlite3.Connection, pr: dict[str, object]) -> tuple[str, sql
 def build_prompt(row: sqlite3.Row) -> str:
     return textwrap.dedent(
         f"""
-        Use $pr-daemon-loop (the canonical v4 pipeline — do not substitute a different review flow)
+        Use $pr (the canonical v4 pipeline — do not substitute a different review flow)
         to review {row['repo']}#{row['pr_number']} in PR-Daemon autonomous watch mode.
 
-        Requirements (on top of everything pr-daemon-loop's own SKILL.md already mandates):
+        Requirements (on top of everything pr's own SKILL.md already mandates):
         - Use the local repository if available (see config/repo-roots.json); never clone to /tmp unless no local checkout exists.
         - Every review must end with a clear conclusion: APPROVE, REQUEST_CHANGES, or COMMENT.
         - Post the corresponding GitHub review/comment as clestons using scripts/post_pr_review.sh.
@@ -471,7 +471,7 @@ def _add_dir_flags(roots: list[str]) -> list[str]:
 
 
 # --- Cost gate: pick the review backend by changed-files risk --------------
-# The pr-daemon-loop skill routes R1=DeepSeek-flash (own API), executor=session
+# The pr skill routes R1=DeepSeek-flash (own API), executor=session
 # model, and R2/R4=Opus + R3=Codex via Agent() sub-agents. Because ANTHROPIC_*
 # overrides are process-global, a session launched through run-dpsk-claude.sh
 # resolves those "opus" sub-agents to DeepSeek too. So we pick the backend PER PR:
@@ -548,7 +548,7 @@ def _build_claude_cmd(roots: list[str], backend: str = "deepseek") -> list[str]:
     # `--print`. A `-p <prompt>` positional is unreliable when claude runs detached
     # (it waits on / errors reading stdin: "Input must be provided…"); stdin-fed is robust.
     max_turns = os.environ.get("PR_DAEMON_REVIEWER_MAX_TURNS", "80")
-    skill_file = str(Path.cwd() / ".claude/skills/pr-daemon-loop/SKILL.md")
+    skill_file = str(Path.cwd() / ".claude/skills/pr/SKILL.md")
     if backend == "real":
         # Real Anthropic (Max OAuth): executor = real Sonnet, R2/R4 spawn real Opus,
         # R3 real Codex. `env -u` strips any ambient DeepSeek override so the CLI hits

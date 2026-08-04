@@ -24,7 +24,7 @@
 
 ### 是什么
 
-PR-Daemon 是一套以 **Claude Code Max 订阅为驱动**的 24/7 全自动 **三轮 PK 式** PR review 系统。在 Claude Code 里输入 `/pr-daemon-loop` 就开始干活——持续监控三个组织（aastar / auraai / mycelium）**所有 open PR**（含 dependabot 等机器人），三个 AI 分工对抗式 review，最终发布 verdict，全程无需人工干预。
+PR-Daemon 是一套以 **Claude Code Max 订阅为驱动**的 24/7 全自动 **三轮 PK 式** PR review 系统。在 Claude Code 里输入 `/pr` 就开始干活——持续监控三个组织（aastar / auraai / mycelium）**所有 open PR**（含 dependabot 等机器人），三个 AI 分工对抗式 review，最终发布 verdict，全程无需人工干预。
 
 **核心设计理念：三轮 PK + Opus 拍板**
 
@@ -45,7 +45,7 @@ PR-Daemon 是一套以 **Claude Code Max 订阅为驱动**的 24/7 全自动 **�
 |------|------|
 | 🥊 **三轮 PK + Opus 拍板** | DeepSeek 初审 → Sonnet 挑战 → Codex PK → Opus 综合拍板 |
 | 🎯 **2/4 轮智能分流** | 按风险类型自动判断审几轮，安全敏感强制 4 轮，省 token 不漏审 |
-| 🔄 **24/7 全自动 Loop** | `/pr-daemon-loop` 一句话启动，发现→分流→PK→发布→循环 |
+| 🔄 **24/7 全自动 Loop** | `/pr` 一句话启动，发现→分流→PK→发布→循环 |
 | 🌐 **全组织全部 PR** | 三个组织所有仓库的全部 open PR，含 dependabot 机器人，不限作者 |
 | 🗂️ **SQLite 全量镜像** | 每轮 `--sync` 把所有 PR 状态入库（作者+reviewer+状态），1 次 GraphQL 2.7s |
 | ♻️ **增量不重复** | 已审且 head 没变的 PR 跳过，只审 new/head-changed 的 delta |
@@ -54,7 +54,7 @@ PR-Daemon 是一套以 **Claude Code Max 订阅为驱动**的 24/7 全自动 **�
 | ✅ **triage 有效性验证** | 跟踪 2/4 轮分流漏判率（目标<5%），偏高自动收紧 |
 | ⛔ **永不 Merge** | 只 review，verdict 必为 APPROVE/REQUEST_CHANGES，merge 属作者 |
 | 🔧 **`$pr-fix` 自动修复** | 两类：① jhfnetboy PRs：RC 修复 → loop 直到 APPROVE；② Bot PRs（dependabot/renovate）：inline review → APPROVE 则自动 merge |
-| 🔌 **可安装 Skill** | `/pr-daemon-loop` slash 命令 + `$pr-daemon-loop` skill，全局可用 |
+| 🔌 **可安装 Skill** | `/pr` slash 命令 + `$pr` skill，全局可用 |
 | 🖥️ **本地模型 Fallback** | 可选 Rapid-MLX 离线 fallback，默认 `Qwen3.6-35B-A3B` |
 
 ### 实际运行截图
@@ -114,7 +114,7 @@ PR-Daemon 是一套以 **Claude Code Max 订阅为驱动**的 24/7 全自动 **�
 ### 架构（v2：Max 订阅驱动，三轮 PK + 2/4 分流）
 
 ```
-在 Claude Code (Max 订阅, Sonnet 主会话) 输入: /pr-daemon-loop
+在 Claude Code (Max 订阅, Sonnet 主会话) 输入: /pr
     │
     └─► Sonnet 编排，24h 循环：
          │
@@ -146,7 +146,7 @@ PR-Daemon 是一套以 **Claude Code Max 订阅为驱动**的 24/7 全自动 **�
 
 ### `$pr-fix` — 自动修复 & 合并 PR（配套 Skill）
 
-`$pr-daemon-loop` 负责 **pure reviewer**（APPROVE / RC，永不 merge）；`$pr-fix` 负责 **两类 PR 的后续处理**，构成完整闭环。
+`$pr` 负责 **pure reviewer**（APPROVE / RC，永不 merge）；`$pr-fix` 负责 **两类 PR 的后续处理**，构成完整闭环。
 
 **两类处理目标：**
 
@@ -210,19 +210,19 @@ Suggested next step: Handle directly in the business repo
 **完整工作流（含 loop 联动）：**
 
 ```
-$pr-daemon-loop（pure reviewer，3-round PK，永不 merge）
+$pr（pure reviewer，3-round PK，永不 merge）
     → 发现并 review 全组织所有 PR（clestons 账号发布 verdict）
     ↓
 $pr-fix（jhfnetboy 账号，调度中心）
     ├─ [Bot PR 路径] poll_fix_queue.py --bot-only
-    │    → 逐 PR 跑 inline pr-daemon-loop review
+    │    → 逐 PR 跑 inline pr review
     │    → APPROVE → gh pr merge --squash（jhfnetboy）
     │    → RC → Tier C 报告给用户，附 PR URL，不 merge
     │
     └─ [jhfnetboy PR 路径] poll_fix_queue.py --human-only
          → 扫出 RC / comment 的 PR
          → 逐 PR 判档：Tier A 直接修 / Tier B 报方案等审批 / Tier C 仅建议
-         → 修复通过自我 review → push → 触发 pr-daemon-loop 再次 review
+         → 修复通过自我 review → push → 触发 pr 再次 review
          → 循环直到 APPROVE
 ```
 
@@ -340,7 +340,7 @@ ls ~/.claude/skills/
 
 | Skill | 调用方式 | 功能 |
 |-------|----------|------|
-| `pr-daemon-loop` | `/pr-daemon-loop` 或 `$pr-daemon-loop` | 24/7 三轮 PK + 2/4 分流 loop |
+| `pr` | `/pr` 或 `$pr` | 24/7 三轮 PK + 2/4 分流 loop |
 | `pk-review` | `$pk-review` | 单个 PR 的完整 PK review |
 | `pr-daemon-status` | `$pr-daemon-status` | 实时进度 + token 消耗看板 |
 | `pr-fix` | `$pr-fix` 或 `$pr-fix OWNER/REPO#N` | 两类：jhfnetboy PRs 修复 loop；Bot PRs review+merge |
@@ -356,15 +356,15 @@ gh api user -q .login    # 必须返回你的主账号
 在你的 **Claude Code（Max 订阅，Sonnet 主会话）** 里直接输入：
 
 ```
-/pr-daemon-loop                          # 三个组织全部 open PR（含 bot）
-/pr-daemon-loop MushroomDAO/CometENS     # 只 review 某一个仓库的所有 PR
-/pr-daemon-loop 只看安全问题              # 带额外指令叠加
+/pr                          # 三个组织全部 open PR（含 bot）
+/pr MushroomDAO/CometENS     # 只 review 某一个仓库的所有 PR
+/pr 只看安全问题              # 带额外指令叠加
 ```
 
 或自然语言触发：
 
 ```
-Use $pr-daemon-loop to start reviewing all open PRs
+Use $pr to start reviewing all open PRs
 ```
 
 启动后每个 PR 完成会打印进度报告（verdict + 状态计数 + token 消耗），随时 `$pr-daemon-status` 看全貌。
@@ -472,9 +472,9 @@ PR-Daemon/
 ├── run-dpsk-claude.sh          ← 可选：DeepSeek 驱动 Claude Code（旧入口）
 ├── env.example                 ← 配置模板（无密钥，可安全提交）
 ├── .claude/
-│   ├── commands/pr-daemon-loop.md  ← /pr-daemon-loop slash 命令（支持参数）
+│   ├── commands/pr.md  ← /pr slash 命令（支持参数）
 │   └── skills/
-│       ├── pr-daemon-loop/SKILL.md   ← 三轮 PK + 2/4 分流主 skill
+│       ├── pr/SKILL.md   ← 三轮 PK + 2/4 分流主 skill
 │       ├── pk-review/SKILL.md        ← 单 PR PK review
 │       ├── pr-fix/SKILL.md           ← 两类：jhfnetboy RC 修复 loop + bot PR review+merge
 │       └── pr-daemon-status/SKILL.md ← 进度+token 看板
@@ -600,13 +600,13 @@ PR_DAEMON_HTTPS_PROXY=http://127.0.0.1:7890
 Then say (voice or text):
 
 ```
-Use $pr-daemon-loop to start reviewing all my open PRs
+Use $pr to start reviewing all my open PRs
 ```
 
 Or headless:
 
 ```bash
-./run-dpsk-claude.sh -p "Use pr-daemon-loop. Review all open PRs by jhfnetboy. Post as clestons. Run until stopped."
+./run-dpsk-claude.sh -p "Use pr. Review all open PRs by jhfnetboy. Post as clestons. Run until stopped."
 ```
 
 ### Architecture
@@ -657,7 +657,7 @@ Or headless:
 
 | Skill | Invoke | Purpose |
 |-------|--------|---------|
-| `pr-daemon-loop` | `$pr-daemon-loop` | Full 24/7 autonomous review loop |
+| `pr` | `$pr` | Full 24/7 autonomous review loop |
 | `pk-review` | `$pk-review` | Single PR deep PK review |
 | `pr-daemon-status` | `$pr-daemon-status` | Live dashboard: queue / verdicts / PK stats |
 

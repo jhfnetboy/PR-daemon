@@ -105,7 +105,7 @@ If no reviews have been posted yet, say: "No reviews recorded yet — daemon may
 
 ## When to auto-print
 
-During `$pr-daemon-loop`, print this dashboard:
+During `$pr`, print this dashboard:
 - At the start of each new loop cycle (after all PRs in a batch are done)
 - When the user asks for it explicitly
 - Before entering idle sleep (`sleep 300`)

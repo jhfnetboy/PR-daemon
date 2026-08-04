@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Scope helper for the ``$start`` patrol skill.
 
-The ``$start`` skill only decides *when* and *for which repos* ``pr-daemon-loop``
+The ``$start`` skill only decides *when* and *for which repos* ``pr``
 runs. This script owns the "which repos" half so the cron prompt stays short and
 the logic stays testable.
 
@@ -212,12 +212,31 @@ def poll(args: list[str]) -> list[dict]:
     return queue if isinstance(queue, list) else []
 
 
-# Standing, user-approved exceptions to pr-daemon-loop's "3 orgs only" rule.
+# Standing, user-approved exceptions to pr's "3 orgs only" rule.
 # Included in scope `all`; clestons already holds collaborator access on both.
 ALL_SCOPE_EXTRA = ["jhfnetboy/NextStop", "jhfnetboy/AISalesMan"]
 
 
-def cmd_targets(limit: int, scope_all: bool) -> int:
+class Scope:
+    """一轮巡检算出来的范围。cmd_targets(机器可读) 和 cmd_list(给人看) 共用同一次计算,
+    免得两个命令各扫一遍 GitHub 还可能给出不一致的答案。"""
+
+    def __init__(self, pins, pinned_hits, default_hits, ordered, pending):
+        self.pins = pins                    # 全部 pin(含当前没有待审 PR 的)
+        self.pinned_hits = pinned_hits      # 有待审 PR 的 pin —— 不占默认名额
+        self.default_hits = default_hits    # 最近更新的前 N 个(pin 之外)
+        self.ordered = ordered              # 所有有待审 PR 的仓库,按最近更新排序
+        self.pending = pending              # repo -> [pr_number, ...]
+
+    @property
+    def targets(self) -> list[str]:
+        return self.pinned_hits + self.default_hits
+
+    def prs(self, repo: str) -> list[int]:
+        return sorted(n for n in self.pending.get(repo, []) if n is not None)
+
+
+def compute_scope(limit: int, scope_all: bool) -> Scope:
     pins = load_pins()
     if scope_all:
         pins = sorted(set(pins) | set(ALL_SCOPE_EXTRA))
@@ -250,28 +269,71 @@ def cmd_targets(limit: int, scope_all: bool) -> int:
     pinned_hits = [r for r in ordered if r in pin_set]
     rest = [r for r in ordered if r not in pin_set]
     default_hits = rest if limit <= 0 else rest[:limit]
-    targets = pinned_hits + default_hits
 
     # Per-repo pending PR numbers, so the scope line can name what it will look at.
     pending: dict[str, list] = {}
     for item in queue:
         pending.setdefault(item.get("repo"), []).append(item.get("pr_number"))
 
+    return Scope(pins, pinned_hits, default_hits, ordered, pending)
+
+
+def cmd_targets(limit: int, scope_all: bool) -> int:
+    scope = compute_scope(limit, scope_all)
+    pin_set = set(scope.pins)
+    targets = scope.targets
+
     # SCOPE line: what this cycle will actually watch, in the short names jason
     # uses. Printed to stderr so stdout stays a clean machine-readable target list.
     parts = []
     for repo in targets:
-        nums = sorted(n for n in pending.get(repo, []) if n is not None)
+        nums = scope.prs(repo)
         pin_mark = "📌" if repo in pin_set else ""
         parts.append(f"{pin_mark}{nick(repo)}#{','.join(str(n) for n in nums)}")
     print("SCOPE: " + ("  ".join(parts) if parts else "(无待审 PR)"), file=sys.stderr)
     print(
         "targets: %d pinned + %d recent (of %d repos with pending PRs)"
-        % (len(pinned_hits), len(default_hits), len(ordered)),
+        % (len(scope.pinned_hits), len(scope.default_hits), len(scope.ordered)),
         file=sys.stderr,
     )
     for repo in targets:
         print(repo)
+    return 0
+
+
+def cmd_list(limit: int, scope_all: bool) -> int:
+    """`$pr list` —— 给人看的扫描范围:默认 N 个是哪些、额外 pin 进来的是哪些。
+
+    和 targets 走同一个 compute_scope,所以这里显示什么,下一轮就真扫什么。
+    """
+    scope = compute_scope(limit, scope_all)
+
+    def line(repo: str) -> str:
+        nums = scope.prs(repo)
+        prs = "#" + ",".join(str(n) for n in nums) if nums else "(无待审)"
+        return f"  {nick(repo):<12} {prs:<16} {repo}"
+
+    cap = "不限(scope=all)" if limit <= 0 else str(limit)
+    print(f"默认扫描位({cap} 个,按最近更新排,只算有待审 PR 的仓库):")
+    print("\n".join(line(r) for r in scope.default_hits) if scope.default_hits
+          else "  (当前没有仓库有待审 PR)")
+
+    print(f"\n额外 pin 进来的仓库({len(scope.pins)} 个,不占上面的名额):")
+    if not scope.pins:
+        print("  (无) —— 用 `$pr add kms` 添加")
+    else:
+        for repo in scope.pins:
+            # pin 了但当前没待审 PR 的也要列出来:用户问的是"额外增加的是哪几个",
+            # 只显示有 PR 的那些会让人以为 pin 掉了。
+            mark = "📌" if repo in scope.pinned_hits else "📌(本轮无待审)"
+            nums = scope.prs(repo)
+            prs = "#" + ",".join(str(n) for n in nums) if nums else ""
+            print(f"  {mark} {nick(repo):<12} {prs:<16} {repo}")
+
+    dropped = len(scope.ordered) - len(scope.pinned_hits) - len(scope.default_hits)
+    print(f"\n本轮实扫 {len(scope.targets)} 个仓库"
+          + (f";另有 {dropped} 个有待审 PR 但没进前 {limit}(下轮它们更新了就会顶上来)"
+             if dropped > 0 else ""))
     return 0
 
 
@@ -297,6 +359,10 @@ def main() -> int:
         help="scope `all`: no cap, plus jhfnetboy/NextStop and jhfnetboy/AISalesMan",
     )
 
+    p_list = sub.add_parser("list", help="human-readable scan scope (default slots + pinned extras)")
+    p_list.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="0 = no cap")
+    p_list.add_argument("--all", action="store_true", dest="scope_all", help="scope `all`")
+
     p_nick = sub.add_parser("nick", help="print the short name for OWNER/REPO")
     p_nick.add_argument("repo")
 
@@ -308,6 +374,9 @@ def main() -> int:
 
     if args.cmd == "targets":
         return cmd_targets(args.limit, args.scope_all)
+
+    if args.cmd == "list":
+        return cmd_list(args.limit, args.scope_all)
 
     pins = load_pins()
     if args.action == "list":

@@ -1,6 +1,6 @@
 ---
 name: pr-fix
-description: Fix and merge PRs across two categories — (1) jhfnetboy's own PRs with RC/comments: fix code, self-review, push, loop with pr-daemon-loop until APPROVE; (2) Bot PRs (dependabot/renovate): inline review, merge if clean, report to user if RC. Three-tier escalation for human PRs. Triggered by "$pr-fix", "$pr-fix OWNER/REPO", or "$pr-fix OWNER/REPO#N".
+description: Fix and merge PRs across two categories — (1) jhfnetboy's own PRs with RC/comments: fix code, self-review, push, loop with pr until APPROVE; (2) Bot PRs (dependabot/renovate): inline review, merge if clean, report to user if RC. Three-tier escalation for human PRs. Triggered by "$pr-fix", "$pr-fix OWNER/REPO", or "$pr-fix OWNER/REPO#N".
 origin: pr-daemon
 ---
 
@@ -132,13 +132,13 @@ catch mistakes in the fix itself:
 - 4-round: DeepSeek R1 → Sonnet R2 challenge → Codex PK → Opus final verdict
 
 After self-review passes and the fix is pushed, we then add `clestons` as reviewer
-(`gh pr edit --add-reviewer clestons`). That triggers the official `$pr-daemon-loop`
+(`gh pr edit --add-reviewer clestons`). That triggers the official `$pr`
 review cycle, which is a separate, independent review of the full updated PR.
 
 ```
 fix diff self-review (jhfnetboy internal)     official PR review (clestons)
 ─────────────────────────────────────────     ──────────────────────────────
-DeepSeek R1  →  Sonnet [→ Codex → Opus]   →  push  →  $pr-daemon-loop reviews full PR
+DeepSeek R1  →  Sonnet [→ Codex → Opus]   →  push  →  $pr reviews full PR
 "is the fix itself correct?"                  "is the whole PR ready to merge?"
 ```
 
@@ -200,7 +200,7 @@ Bot PRs (dependabot / renovate) cannot push new commits — they follow a differ
 
 ```
 For each 🤖 bot PR:
-  1. Run inline pr-daemon-loop review (same 2/4-round pipeline, clestons posts verdict)
+  1. Run inline pr review (same 2/4-round pipeline, clestons posts verdict)
   2. Check verdict:
      APPROVE (no blocking findings):
        → gh pr merge N --repo OWNER/REPO --squash --auto   # jhfnetboy account
@@ -368,7 +368,7 @@ git push origin <branch>
 
 ## Step 7 — Inline review cycle (fix → review → loop)
 
-This is the core loop. After pushing, run the pr-daemon-loop pipeline inline for this
+This is the core loop. After pushing, run the pr pipeline inline for this
 single PR (as clestons), check the verdict, then decide whether to loop again.
 
 ### 7a — Post fix comment + request review
@@ -385,14 +385,14 @@ EOF
 gh pr edit N --repo OWNER/REPO --add-reviewer clestons
 ```
 
-### 7b — Run pr-daemon-loop pipeline for this PR (inline, as clestons)
+### 7b — Run pr pipeline for this PR (inline, as clestons)
 
-Execute the full pr-daemon-loop review pipeline for OWNER/REPO#N:
+Execute the full pr review pipeline for OWNER/REPO#N:
 
 1. `gh pr diff N --repo OWNER/REPO > /tmp/pr-N-recheck.diff`
 2. `python3 PR_DAEMON_ROOT/scripts/compress_diff.py ...`
 3. R1 DeepSeek review
-4. Triage confirm (2-round or 4-round) — use same triage rules as pr-daemon-loop
+4. Triage confirm (2-round or 4-round) — use same triage rules as pr
 5. [2-round] Sonnet verdict directly
    [4-round] Sonnet R2 → Codex PK → Opus verdict
 6. Write verdict to `/tmp/review-N-roundN.md`
