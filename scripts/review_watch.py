@@ -327,26 +327,27 @@ def mark_reviewing(conn: sqlite3.Connection, row: sqlite3.Row) -> None:
     )
 
 
-def latest_clestons_review_commit(repo: str, number: int) -> str:
+def latest_clestons_review_commit(repo: str, number: int) -> str | None:
     """Commit SHA the latest clestons review was ACTUALLY posted on, via the REST reviews API
-    (unlike gh's `latestReviews.commit.oid`, which comes back empty). Returns "" if none.
+    (unlike gh's `latestReviews.commit.oid`, which comes back empty).
 
-    Used so refresh_review_state records the REVIEWED head, not the current PR head: a reviewer
-    subprocess that returned rc=0 but never posted at the current head (a "phantom run") would
-    otherwise mark last_reviewed_head_oid = current head and silently stall — the PR looks
-    reviewed to the queue but GitHub never got the verdict. Recording the review's real commit
-    leaves last_reviewed at the old/empty SHA, so the PR stays needs_review and gets re-reviewed.
+    Returns:
+      "<sha>" — a clestons review exists, posted on that commit,
+      ""      — VERIFIED: no clestons review exists (a real 'phantom' non-posting run),
+      None    — verification FAILED (gh api errored / rate-limited / bad JSON). MUST NOT be
+                treated as 'no review' — the caller falls back to the old behavior so a transient
+                API failure can't re-review an already-verdicted PR into an infinite loop.
     """
     review_user = os.environ.get("PR_DAEMON_REVIEW_USER", "clestons")
     try:
         data = run_json(
-            ["gh", "api", f"repos/{repo}/pulls/{number}/reviews", "--paginate"],
+            ["gh", "api", f"repos/{repo}/pulls/{number}/reviews", "--paginate", "--per-page", "100"],
             retries=2,
         )
     except Exception:
-        return ""
+        return None
     if not isinstance(data, list):
-        return ""
+        return None
     commit = ""
     for review in data:  # REST returns chronological order → keep the LAST clestons review
         if isinstance(review, dict):
@@ -362,9 +363,20 @@ def refresh_review_state(conn: sqlite3.Connection, repo: str, pr_number: int) ->
     state = str(viewed.get("state") or "")
     review_decision = str(viewed.get("reviewDecision") or "")
     head_oid = str(viewed.get("headRefOid") or "")
-    # The head the review was ACTUALLY posted on — NOT the current PR head — so a phantom rc=0 run
-    # that didn't post leaves last_reviewed at the old/empty SHA and the PR stays needs_review.
+    # Record the head the review was ACTUALLY posted on — NOT blindly the current PR head — so a
+    # phantom rc=0 run (didn't post) leaves last_reviewed at the old SHA → PR stays needs_review.
     review_commit = latest_clestons_review_commit(repo, pr_number)
+    if review_commit is None:
+        # REST verification FAILED (transient) — keep the old behavior (head_oid) rather than
+        # blanking last_reviewed, which would re-review an already-verdicted PR into a loop.
+        reviewed_head = head_oid
+    elif review_commit == "" and clestons_state in ("APPROVED", "CHANGES_REQUESTED", "COMMENTED"):
+        # view_pr already saw a clestons verdict but the reviews REST list lagged (eventual
+        # consistency) — trust that it posted at the current head; don't re-review (would duplicate).
+        reviewed_head = head_oid
+    else:
+        # real posted commit, or "" = VERIFIED no review yet (genuine phantom) → stays needs_review.
+        reviewed_head = review_commit
 
     if state != "OPEN":
         status = state.lower() or "closed"
@@ -389,7 +401,7 @@ def refresh_review_state(conn: sqlite3.Connection, repo: str, pr_number: int) ->
             status = ?
         WHERE repo = ? AND pr_number = ?
         """,
-        (head_oid, review_decision, review_commit, clestons_state, status, repo, pr_number),
+        (head_oid, review_decision, reviewed_head, clestons_state, status, repo, pr_number),
     )
 
 
