@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # refresh-scan-focus.sh — regenerate the PR-daemon scan list (~/.config/prbot/repos.conf)
-# as "the N most-recently-pushed repos across our orgs" PLUS any manually pinned repos.
+# as "the N repos whose DEFAULT BRANCH was committed to most recently" PLUS pinned repos.
 #
 # Why: watching whole orgs meant scanning hundreds of dormant repos every cycle. The daemon
-# should focus on where work is actually happening — the top-N by GitHub pushedAt — while still
-# letting you PIN specific repos that must always be watched regardless of recency.
+# should focus on where work is actually happening — top-N by last default-branch commit —
+# while still letting you PIN specific repos that must always be watched regardless of recency.
+# NOTE the metric is committedDate on the default branch, NOT repo.pushedAt: pushedAt counts
+# any ref push, so dependabot/renovate PR branches keep dormant repos looking active.
 #
 #   refresh-scan-focus.sh                 # (default) recompute top-N + pinned → write repos.conf
 #   refresh-scan-focus.sh refresh         # same as above (FORCE — always recomputes)
@@ -61,21 +63,35 @@ pin_rm() {
 }
 
 refresh() {
-  local scan; scan="$(mktemp)"   # tab-separated: pushedAt \t owner/repo
+  local scan; scan="$(mktemp)"   # tab-separated: <default-branch last commit date> \t owner/repo
   local org r ts
+
+  # RANKING METRIC = last commit on the DEFAULT BRANCH, *not* repo.pushedAt.
+  # pushedAt is bumped by a push to ANY ref — including dependabot/renovate pushing PR
+  # branches. A repo whose trunk has been dormant for a month still looks "active" by
+  # pushedAt (real case: SuperPaymaster, pushedAt=08-03 but main's last commit=07-09,
+  # inflated purely by bot dependency PRs) and would crowd a genuinely active repo out
+  # of the top-N. committedDate on defaultBranchRef tracks where work actually lands.
+  local gq='query($org:String!, $cursor:String){organization(login:$org){repositories(first:100, after:$cursor, isArchived:false, orderBy:{field:PUSHED_AT,direction:DESC}){pageInfo{hasNextPage endCursor} nodes{nameWithOwner pushedAt defaultBranchRef{target{... on Commit{committedDate}}}}}}}'
 
   # org repos (non-archived) → candidate pool
   while IFS= read -r org; do
     [ -z "$org" ] && continue
-    gh repo list "$org" --no-archived --limit 300 --json nameWithOwner,pushedAt 2>/dev/null \
-      | python3 -c "import json,sys
-for x in json.load(sys.stdin): print(x['pushedAt']+'\t'+x['nameWithOwner'])" >> "$scan"
+    # Fall back to pushedAt when committedDate is missing (empty repo / odd default ref),
+    # so such a repo still sorts rather than silently vanishing from the pool.
+    gh api graphql -f query="$gq" -f org="$org" --paginate \
+      --jq '.data.organization.repositories.nodes[] | [(.defaultBranchRef.target.committedDate // .pushedAt), .nameWithOwner] | @tsv' \
+      2>/dev/null >> "$scan"
   done < <(readconf "$ORGS_F")
 
-  # personal candidates → also eligible for the top-N
+  # personal candidates → also eligible for the top-N (same metric: default-branch HEAD date)
   while IFS= read -r r; do
     [ -z "$r" ] && continue
-    ts="$(gh repo view "$r" --json pushedAt 2>/dev/null \
+    ts="$(gh api "repos/$r/commits?per_page=1" 2>/dev/null \
+      | python3 -c "import json,sys
+d=json.load(sys.stdin)
+print(d[0]['commit']['author']['date'] if isinstance(d,list) and d else '')" 2>/dev/null)"
+    [ -z "$ts" ] && ts="$(gh repo view "$r" --json pushedAt 2>/dev/null \
       | python3 -c "import json,sys;print(json.load(sys.stdin).get('pushedAt',''))" 2>/dev/null)"
     [ -n "$ts" ] && printf '%s\t%s\n' "$ts" "$r" >> "$scan"
   done < <(readconf "$PERS_F")
