@@ -26,8 +26,10 @@ import sys, os, json, subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-# AuraAIHQ was renamed to iDoris-ai (old name now 404s -> "Invalid search query").
-ORGS = ["AAStarCommunity", "iDoris-ai", "MushroomDAO"]
+import sys, pathlib as _pl
+sys.path.insert(0, str(_pl.Path(__file__).resolve().parent))
+import scan_scope  # single source of truth: ~/.config/prbot/repos.conf
+ORGS = scan_scope.orgs()
 
 
 # ──────────────────────────────────────────────────────────────
@@ -90,7 +92,7 @@ def gh_api(path, token=None):
 def _list_repos(repo_filter=None):
     if repo_filter:
         return [repo_filter]
-    repos = []
+    repos = list(scan_scope.extra_repos())   # personal repos on the include-list
     for org in ORGS:
         try:
             page = gh_api(f"orgs/{org}/repos?type=all&per_page=100")

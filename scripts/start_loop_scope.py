@@ -36,7 +36,10 @@ import sys
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 POLL = REPO_ROOT / "scripts" / "poll_prs.py"
 
-ORGS = ["AAStarCommunity", "iDoris-ai", "MushroomDAO"]
+import sys, pathlib as _pl
+sys.path.insert(0, str(_pl.Path(__file__).resolve().parent))
+import scan_scope  # single source of truth: ~/.config/prbot/repos.conf
+ORGS = scan_scope.orgs()
 # Extra owners searched when resolving a bare repo name like "kms".
 RESOLVE_OWNERS = ORGS + ["jhfnetboy"]
 
@@ -89,28 +92,73 @@ def state_dir() -> pathlib.Path:
 
 
 def pins_path() -> pathlib.Path:
+    """The ONE place a pin is written: `~/.config/prbot/focus-manual.conf`.
+
+    Until 2026-08-05 pins lived in `.state/pr-daemon/start-loop-pinned.json`, which
+    only this script read, while `focus-manual.conf` fed `repos.conf` which only the
+    (not-running) `review_watch.py` read. "Pin a repo" therefore meant two edits in
+    two files, and a repo could be in one and not the other — it happened. One file
+    now, and `refresh-scan-focus.sh` folds it into `repos.conf` for every consumer.
+    """
+    return scan_scope.CFG / "focus-manual.conf"
+
+
+def _legacy_pins_path() -> pathlib.Path:
     return state_dir() / "start-loop-pinned.json"
 
 
 def load_pins() -> list[str]:
+    """Pins from focus-manual.conf, with a one-way migration off the old JSON."""
     path = pins_path()
-    if not path.exists():
-        return []
+    out: list[str] = []
     try:
-        data = json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError) as exc:
-        print(f"warn: unreadable {path}: {exc}", file=sys.stderr)
-        return []
-    repos = data.get("repos") if isinstance(data, dict) else data
-    if not isinstance(repos, list):
-        return []
-    return [r for r in repos if isinstance(r, str) and "/" in r]
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.split("#", 1)[0].strip()
+            if "/" in line and line not in out:
+                out.append(line)
+    except OSError:
+        pass
+
+    # Migrate anything still stranded in the retired JSON, then leave it alone —
+    # silently dropping a pin the user set is worse than a redundant file.
+    legacy = _legacy_pins_path()
+    if legacy.exists():
+        try:
+            data = json.loads(legacy.read_text())
+            old = data.get("repos") if isinstance(data, dict) else data
+            stranded = [r for r in (old or []) if isinstance(r, str) and "/" in r and r not in out]
+            if stranded:
+                print(
+                    f"note: migrating {len(stranded)} pin(s) from the retired "
+                    f"{legacy.name} into {path}: {', '.join(stranded)}",
+                    file=sys.stderr,
+                )
+                out.extend(stranded)
+                save_pins(out)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return out
 
 
 def save_pins(repos: list[str]) -> None:
+    """Write focus-manual.conf, then regenerate repos.conf so the change takes effect.
+
+    Writing the pin file alone is not enough: `repos.conf` is the generated artifact
+    every consumer reads, so a pin that never triggers a refresh is invisible.
+    """
     path = pins_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"repos": sorted(set(repos))}, indent=2) + "\n")
+    path.write_text("\n".join(sorted(set(repos))) + "\n")
+    refresh = REPO_ROOT / "scripts" / "refresh-scan-focus.sh"
+    if refresh.exists():
+        try:
+            subprocess.run(["bash", str(refresh)], capture_output=True, timeout=180)
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            print(
+                f"warn: pin saved to {path}, but regenerating repos.conf failed ({exc}). "
+                f"Run `bash {refresh}` before relying on the new scope.",
+                file=sys.stderr,
+            )
 
 
 # --------------------------------------------------------------------------
@@ -248,11 +296,14 @@ def compute_scope(limit: int, scope_all: bool) -> Scope:
         print(f"warn: org-wide sync failed: {exc}", file=sys.stderr)
         queue = []
 
-    # Pinned repos outside the three orgs need their own scoped sync — the
-    # org-wide pass above never sees them. Failures are isolated per repo so one
-    # dead/renamed pin cannot sink the whole cycle.
+    # Pins the org-wide pass genuinely cannot see need their own scoped sync.
+    # Since the scope consolidation the org sweep already adds a `repo:` term for
+    # every listed repo outside the swept orgs (scan_scope.extra_repos()), so a
+    # second poll here would return the SAME PRs again — observed as
+    # `nextstop #26,26,27,27`. Only poll a pin that is in neither set.
+    already_swept = set(scan_scope.extra_repos())
     for repo in pins:
-        if repo.split("/", 1)[0] in ORGS:
+        if repo.split("/", 1)[0] in ORGS or repo in already_swept:
             continue
         try:
             queue.extend(poll(["--repo", repo, "--sync", "--max", "50"]))

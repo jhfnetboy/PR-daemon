@@ -8,8 +8,10 @@ A PR is "needs review" if no clestons review exists whose commit == the PR head
 """
 import json, subprocess, sys
 
-# AuraAIHQ was renamed to iDoris-ai (old name now 404s -> "Invalid search query").
-ORGS = ["AAStarCommunity", "iDoris-ai", "MushroomDAO"]
+import sys, pathlib as _pl
+sys.path.insert(0, str(_pl.Path(__file__).resolve().parent))
+import scan_scope  # single source of truth: ~/.config/prbot/repos.conf
+ORGS = scan_scope.orgs()
 REVIEWER = "clestons"
 
 def gh(args):

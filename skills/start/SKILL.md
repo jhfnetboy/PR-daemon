@@ -1,10 +1,19 @@
 ---
 name: start
-description: Start (or reconfigure) a recurring background PR-patrol job. Default = every 10 min, the 8 most-recently-updated repos with pending-review PRs across the 3 orgs, plus any pinned repos. "$start add kms" pins a repo into the scan list permanently; "$start remove kms" unpins it. "$start all" = full 3-org scan + jhfnetboy/NextStop + jhfnetboy/AISalesMan. "$start Nm [all]" overrides the interval. Self-stops after 1h with nothing to review. Delegates every actual review to the unmodified pr skill — this skill only schedules and scopes. Triggered by "start", "$start", "开始巡检", "巡检安排".
+description: "ALIAS — the documented command is now `$pr start [Nm] [all]` / `$pr stop`. This file holds only the cron scheduling mechanics that `$pr start` reads (Steps 1-5). Scope/pin management moved to the `pr` skill and to ONE file, ~/.config/prbot/repos.conf. Still triggered by \"start\", \"$start\", \"开始巡检\" for muscle memory."
 origin: pr-daemon
 ---
 
-# Start — scheduled PR patrol launcher
+# Start — cron mechanics for `$pr start` (not a separate entry point)
+
+> ⚠️ **Consolidated 2026-08-05.** The user-facing command is **`$pr start [Nm] [all]`** /
+> **`$pr stop`**. This file is the implementation `$pr start` reads for Steps 1-5.
+>
+> **Path A (pin management) below is RETIRED** — pins now live in exactly one place,
+> `~/.config/prbot/focus-manual.conf` → `repos.conf`, managed by `$pr add` / `$pr remove`.
+> Do not use the `start-loop-pinned.json` flow it describes; that file is archived as
+> `.retired-20260805` and its contents were migrated. If an invocation starts with
+> `add`/`remove`/`pins`, hand it to the `pr` skill instead of following Path A.
 
 This skill never reviews anything itself and never edits `pr`. It only
 manages a `CronCreate` job whose fired prompt narrows the repo scope for this cycle

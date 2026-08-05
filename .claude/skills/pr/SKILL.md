@@ -1,6 +1,6 @@
 ---
 name: pr
-description: "PR review + scan-scope management. Subcommands: `$pr list` shows the scan scope (default 8 slots + pinned extras), `$pr add/remove <repo>` pins/unpins a repo, `$pr OWNER/REPO[#N]` reviews one repo/PR, bare `$pr` runs the full 24/7 autonomous review loop (v4). Sonnet=pure executor, DeepSeek=dual-pass R1 (full+security parallel), Opus=R2 strategic independent reviewer + final verdict, Codex=R3 adversarial PK against Opus findings. Evaluate vs v3 after each PR."
+description: "PR review + scan-scope management. Subcommands: `$pr list` shows the scan scope (default 8 slots + pinned extras), `$pr add/remove <repo>` pins/unpins a repo (one list: ~/.config/prbot/repos.conf), `$pr start [Nm]` / `$pr stop` manage the recurring patrol cron, `$pr OWNER/REPO[#N]` reviews one repo/PR, bare `$pr` runs the full 24/7 autonomous review loop (v4). Sonnet=pure executor, DeepSeek=dual-pass R1 (full+security parallel), Opus=R2 strategic independent reviewer + final verdict, Codex=R3 adversarial PK against Opus findings. Evaluate vs v3 after each PR."
 origin: pr-daemon
 ---
 
@@ -20,6 +20,8 @@ no-subcommand forms run the review pipeline below.
 |---|---|
 | `$pr list` | Print the scan scope, then **stop** (no review). See below. |
 | `$pr add <name>` / `$pr remove <name>` | Pin/unpin a repo, then **stop**. |
+| `$pr start [Nm] [all]` | Start/reconfigure the recurring patrol cron, then **stop**. |
+| `$pr stop` | Delete the patrol cron, then **stop**. |
 | `$pr` | Org-scan mode — run the pipeline over the current scan scope. |
 | `$pr OWNER/REPO` | Single-repo mode — every open PR in that repo. |
 | `$pr OWNER/REPO#N` | Single-PR mode. |
@@ -31,7 +33,7 @@ export PR_DAEMON_STATE_DIR=/Users/jason/Dev/tools/PR-Daemon/.state/pr-daemon
 # $pr list — default slots (8 most-recently-updated repos WITH pending PRs) + pinned extras
 python3 scripts/start_loop_scope.py list
 
-# $pr add kms  /  $pr remove kms  — pins persist in .state/pr-daemon/start-loop-pinned.json
+# $pr add kms  /  $pr remove kms
 python3 scripts/start_loop_scope.py pins add kms
 python3 scripts/start_loop_scope.py pins remove kms
 ```
@@ -41,7 +43,37 @@ and deliberately shows pins that currently have **no** pending PR (hiding them r
 the pin was dropped). An ambiguous/unknown name on `add` exits non-zero and prints the
 candidates: relay them and stop, **do not pick one for the user**.
 
-> These subcommands only *scope* the patrol; the recurring schedule itself is `$start`'s job.
+### ⛔ ONE list, ONE command (consolidated 2026-08-05)
+
+**Scope lives in exactly one file: `~/.config/prbot/repos.conf`.** Everything reads it
+through `scripts/scan_scope.py` — `poll_prs.py`, `poll_fix_queue.py`, `review_queue.py`,
+`start_loop_scope.py`. Hand-edits go to `~/.config/prbot/focus-manual.conf` (or just run
+`$pr add`, which writes it AND regenerates `repos.conf`). **Never hand-edit `repos.conf`** —
+its own header says so and `refresh-scan-focus.sh` overwrites it.
+
+What this replaced, so nobody rebuilds it: scope used to have *three* disagreeing sources —
+a hardcoded `ORGS = [...]` copied into four scripts (the list that actually ran), a
+`start-loop-pinned.json` read only by `start_loop_scope.py`, and `repos.conf` read only by
+`review_watch.py`, **which is not running** — so pinning a repo there changed nothing.
+`$start` is now an alias for `$pr start`; there is no second entry point.
+
+`scan_scope.orgs()` (swept wholesale) comes from `candidate-orgs.conf`, NOT from the owners
+in `repos.conf` — otherwise listing `jhfnetboy/CMIC` would sweep all of that account's
+hundreds of personal repos. Personal repos on the list are queried individually
+(`scan_scope.extra_repos()`), which is what finally made them visible to the org-wide sweep
+instead of requiring an explicit `--repo`.
+
+### `$pr start [Nm] [all]` / `$pr stop` — the recurring patrol
+
+Scheduling mechanics (dedupe against an existing job, idle bookkeeping, the cron expression,
+the fired-prompt template, the 1-hour idle self-stop) live in `.claude/skills/start/SKILL.md`
+— **read it and follow Steps 1-5 there**, skipping its "Path A / pin management" section,
+which this file now owns. `$pr stop` = its Step-5 note: `CronList` → find the job whose
+prompt contains `[[start-loop]]` → `CronDelete` it.
+
+That file is implementation detail for this subcommand, not a second entry point. `$start`
+still resolves to it for muscle memory, but **`$pr start` is the documented command** and the
+one to tell the user about.
 
 > ⛔ **ABSOLUTE CONSTRAINT #1 — Review only, NEVER merge**
 > Pure reviewer. NEVER merge any PR regardless of author (human or bot).
@@ -56,7 +88,7 @@ candidates: relay them and stop, **do not pick one for the user**.
 > Do NOT dismiss a Codex finding without concrete counter-evidence.
 >
 > ⛔ **ABSOLUTE CONSTRAINT #4 — configured scopes only (allowlist)**
-> Review PRs only in the configured scan scopes (`~/.config/prbot/repos.conf`): the `AAStarCommunity`
+> Review PRs only in the ONE configured scan scope (`~/.config/prbot/repos.conf`, resolved via `scripts/scan_scope.py`): the `AAStarCommunity`
 > / `iDoris-ai` / `MushroomDAO` orgs, PLUS any personal `owner/repo` explicitly added to that file as
 > an include-list entry (e.g. `jhfnetboy/CMIC`). Personal repos are NOT scanned by default (there are
 > hundreds); the include-list is the allowlist. Never review a personal PR that is not on that list.
@@ -649,7 +681,7 @@ python3 /Users/jason/Dev/tools/PR-Daemon/scripts/triage_db.py report
 - **Security-sensitive PRs always go 4-round** — no downgrade.
 - **Never COMMENT-limbo** — always APPROVE or REQUEST_CHANGES.
 - **Never `gh pr review` directly** — always `post_pr_review.sh`.
-- **Scope = `~/.config/prbot/repos.conf`** — review iff the repo is listed there. That file is the
+- **Scope = `~/.config/prbot/repos.conf` (single source; see "ONE list, ONE command")** — review iff the repo is listed there. That file is the
   allowlist and it DOES include individually added personal repos (e.g. `jhfnetboy/CMIC`); see
   ABSOLUTE CONSTRAINT #4. (This line used to read "3 orgs only — never personal PRs", which
   contradicted constraint #4 and made a reviewer stop mid-run to ask which one to obey.)

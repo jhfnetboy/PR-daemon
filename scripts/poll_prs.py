@@ -25,9 +25,13 @@ from datetime import datetime, timezone, timedelta
 ROOT = Path(__file__).resolve().parent.parent
 STATE_DB = ROOT / ".state" / "pr-daemon" / "pr-watch.sqlite"
 
-# 3 orgs only (per DESIGN.md). Never review personal jhfnetboy PRs.
-# NOTE: AuraAIHQ was renamed to iDoris-ai (old name now 404s -> "Invalid search query").
-ORGS = ["AAStarCommunity", "iDoris-ai", "MushroomDAO"]
+# Scan scope comes from ~/.config/prbot/repos.conf via scan_scope — ONE file, read
+# by every consumer. It used to be a hardcoded list here (and three more copies in
+# sibling scripts), which is why adding a repo to repos.conf changed nothing and
+# personal repos like jhfnetboy/CMIC were only ever reachable via an explicit
+# `--repo`. Edit `focus-manual.conf` (or run `$pr add <repo>`), never this line.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import scan_scope  # noqa: E402
 
 
 def load_main_user():
@@ -65,7 +69,12 @@ def gh_search_org_prs():
     Returns dicts shaped like gh search, PLUS headRefOid (so sync needs no per-PR
     head fetch). Paginates if >100. Goal: clear every PR, so no author filter.
     """
-    q = " ".join(f"org:{o}" for o in ORGS) + " is:pr is:open"
+    # Orgs are swept wholesale; listed repos outside them (personal repos on the
+    # include-list, e.g. jhfnetboy/CMIC) need their own `repo:` term or the sweep
+    # simply never sees them — which is exactly why they used to require --repo.
+    terms = [f"org:{o}" for o in scan_scope.orgs()]
+    terms += [f"repo:{r}" for r in scan_scope.extra_repos()]
+    q = " ".join(terms) + " is:pr is:open"
     results = []
     cursor = None
     for _page in range(10):  # up to 1000 PRs
