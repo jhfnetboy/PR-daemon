@@ -176,5 +176,99 @@ want("added file is removed on revert, so the test correctly fails without it",
      r.returncode == 0 and "load-bearing" in r.stdout, f"rc={r.returncode}\n{r.stdout}")
 shutil.rmtree(d, ignore_errors=True)
 
+print("[6] a prefix-colliding sibling must not clear an inert test (false NEGATIVE)")
+# The bug: `-t "discount ok"` is a REGEX, so it also selects "discount ok with remainder".
+# The sibling fails after the revert, the command exits non-zero, and the inert test under
+# examination gets cleared as load-bearing — silently missing the exact defect this tool exists
+# to find. The synthetic runner below models that: it runs EVERY test whose name contains the
+# pattern, and fails if any of them fails.
+GREEDY_RUNNER = """#!/usr/bin/env bash
+set -uo pipefail
+[ -f ./src/impl.sh ] || exit 1
+source ./src/impl.sh
+rc=0
+while read -r n; do
+  case "$n" in *"$2"*) eval "$(grep -A2 "TESTBODY:$n" "$1" | tail -1)" || rc=1 ;; esac
+done < <(grep -o 'TESTBODY:[^ ]*' "$1" | sed 's/TESTBODY://' | sort -u)
+exit $rc
+"""
+d = repo_with([
+    {"src/impl.sh": BUGGY, "tests/t.sh": "# TESTBODY:old\ntrue\n"},
+    {"src/impl.sh": FIXED,
+     "tests/t.sh": ('it("discount ok")\n# TESTBODY:discount ok\n[ "$(clamp 5)" = "3" ]\n'
+                    'it("discount ok with remainder")\n'
+                    '# TESTBODY:discount ok with remainder\n[ "$(clamp 9)" = "3" ]\n')},
+])
+(d / "runner.sh").write_text(GREEDY_RUNNER)
+(d / "runner.sh").chmod(0o755)
+base, head = shas(d)
+r = run_tool(d, base, head)
+# With a custom --test-cmd there is no JSON report, so selection COUNT is unknowable and the
+# collision genuinely cannot be resolved — the tool must say so instead of presenting a clean
+# verdict. (The auto-detected vitest/jest path does resolve it, via --reporter=json; that path is
+# covered by the real-repo run documented in the PR body, since it needs node_modules.)
+want("custom runners are flagged as unable to confirm selection",
+     "无法确认" in r.stdout, r.stdout)
+shutil.rmtree(d, ignore_errors=True)
+
+print("[7] nothing verifiable is exit 1, never a green all-clear")
+d = repo_with([
+    {"src/impl.sh": BUGGY, "tests/t.sh": "# TESTBODY:old\ntrue\n"},
+    # The new test is red at PR head (asserts something false), so it can never be judged.
+    {"src/impl.sh": FIXED, "tests/t.sh": 'it("broken")\n# TESTBODY:broken\nfalse\n'},
+])
+base, head = shas(d)
+r = run_tool(d, base, head)
+want("exit 1, not 0", r.returncode == 1, f"rc={r.returncode}\n{r.stdout}")
+want("does NOT claim all load-bearing", "all 1 new test" not in r.stdout, r.stdout)
+want("says it could not verify", "无法验证" in r.stdout, r.stdout)
+shutil.rmtree(d, ignore_errors=True)
+
+print("[8] a substring-named sibling is not mistaken for a rename")
+# base has "computes total with discount"; the PR adds a genuinely new, genuinely inert
+# "computes total". Matching "the line contains the name" picked up the OLDER test's body,
+# found it in base, and skipped the new one as a rename — a silent false negative.
+old_body = '\n  [ "$(clamp 5)" = "3" ]\n# TESTBODY:computes total with discount\n[ "$(clamp 5)" = "3" ]\n'
+d = repo_with([
+    {"src/impl.sh": BUGGY,
+     "tests/t.sh": 'it("computes total with discount", () => {' + old_body + '});\n'},
+    {"src/impl.sh": FIXED,
+     "tests/t.sh": ('it("computes total with discount", () => {' + old_body + '});\n'
+                    'it("computes total")\n# TESTBODY:computes total\n[ "$(clamp 5)" = "3" ]\n')},
+])
+base, head = shas(d)
+r = run_tool(d, base, head)
+want("the new substring-named test is NOT skipped as a rename",
+     "skip (renamed" not in r.stdout or "computes total\"" not in r.stdout, r.stdout)
+want("it is judged and reported", r.returncode == 2, f"rc={r.returncode}\n{r.stdout}")
+shutil.rmtree(d, ignore_errors=True)
+
+print("[9] a non-JS test file is refused, not silently cleared")
+d = repo_with([
+    {"src/impl.sh": BUGGY, "tests/lib.rs": "// nothing\n"},
+    {"src/impl.sh": FIXED, "tests/lib.rs": "#[test]\nfn clamps_nine() { assert_eq!(clamp(9), 3); }\n"},
+])
+base, head = shas(d)
+r = subprocess.run(
+    [sys.executable, str(SCRIPT), "--repo-path", str(d), "--base", base, "--head", head],
+    capture_output=True, text=True)
+want("exit 1 for a language it cannot read", r.returncode == 1, f"rc={r.returncode}\n{r.stdout}")
+want("says so plainly", "不支持的测试语言" in r.stdout, r.stdout)
+shutil.rmtree(d, ignore_errors=True)
+
+print("[10] source files are not misclassified as tests by a bare substring")
+d = repo_with([
+    {"src/latest.sh": BUGGY, "tests/t.sh": "# TESTBODY:old\ntrue\n"},
+    {"src/latest.sh": FIXED,
+     "tests/t.sh": 'it("inert")\n# TESTBODY:inert\n[ "$(clamp 5)" = "3" ]\n'},
+])
+(d / "runner.sh").write_text(RUNNER.replace("./src/impl.sh", "./src/latest.sh"))
+(d / "runner.sh").chmod(0o755)
+base, head = shas(d)
+r = run_tool(d, base, head)
+want("src/latest.sh is treated as SOURCE (it contains 'test' as a substring)",
+     "src/latest.sh" in r.stdout and "no source file" not in r.stdout, r.stdout)
+shutil.rmtree(d, ignore_errors=True)
+
 print(f"\npassed: {PASS}   failed: {FAIL}")
 sys.exit(1 if FAIL else 0)
