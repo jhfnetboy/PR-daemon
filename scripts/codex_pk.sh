@@ -36,6 +36,43 @@ ATTEMPTS="${CODEX_ATTEMPTS:-1}"
 
 [ -f "$PROMPT_FILE" ] || { echo "ERROR: prompt file not found: $PROMPT_FILE" >&2; exit 1; }
 
+# ── Short-term circuit breaker (added 2026-08-06) ────────────────────────────
+# A hung `codex exec` costs a full stall+cap cycle before we learn anything. Measured on
+# CoLivingOS#74: 366s of a 1159s review — 31.6% of the wall clock — spent waiting on a process
+# that produced zero bytes. The stall detector caps ONE attempt; it does nothing about paying
+# that tax again on the very next PR. So a hang trips a breaker: subsequent calls skip codex
+# and go straight to DeepSeek until the breaker expires, then let exactly one probe through.
+#
+# The breaker is deliberately SHORT (30 min). Codex outages are usually transient; a long
+# breaker would quietly downgrade every review of a session to the fallback challenger.
+BREAKER_FILE="${CODEX_BREAKER_FILE:-${PR_DAEMON_STATE_DIR:-$HERE/../.state/pr-daemon}/codex-breaker.json}"
+BREAKER_SECS="${CODEX_BREAKER_SECS:-1800}"
+
+breaker_age() {   # seconds since the breaker tripped, or "" if not tripped
+  [ -f "$BREAKER_FILE" ] || return 1
+  local m; m="$(stat -f%m "$BREAKER_FILE" 2>/dev/null || echo 0)"
+  [ "$m" -gt 0 ] || return 1
+  echo $(( $(date +%s) - m ))
+}
+
+trip_breaker() {  # $1 = reason
+  mkdir -p "$(dirname "$BREAKER_FILE")" 2>/dev/null
+  printf '{"tripped_at":"%s","reason":"%s","breaker_secs":%s}\n' \
+    "$(date -Iseconds)" "$1" "$BREAKER_SECS" > "$BREAKER_FILE" 2>/dev/null || true
+}
+
+BREAKER_OPEN=0
+if age="$(breaker_age)"; then
+  if [ "$age" -lt "$BREAKER_SECS" ]; then
+    BREAKER_OPEN=1
+    BREAKER_WHEN="$(sed -n 's/.*"tripped_at":"\([^"]*\)".*/\1/p' "$BREAKER_FILE" 2>/dev/null)"
+    echo "[codex_pk] breaker OPEN (codex hung ${age}s ago at ${BREAKER_WHEN:-?}, expires in $(( BREAKER_SECS - age ))s) — skipping codex" >&2
+  else
+    echo "[codex_pk] breaker expired after ${age}s — letting one codex probe through" >&2
+    rm -f "$BREAKER_FILE"
+  fi
+fi
+
 filesize() { wc -c < "$1" 2>/dev/null | tr -d ' ' || echo 0; }
 
 # Kill the whole process GROUP, not just the direct child. `codex exec` spawns
@@ -106,19 +143,42 @@ run_codex_once() {
   return 0
 }
 
-for i in $(seq 1 "$ATTEMPTS"); do
-  echo "[codex_pk] codex attempt $i/$ATTEMPTS (stall=${STALL_SECS}s cap=${MAX_SECS}s)" >&2
-  if run_codex_once "$i"; then
-    echo "[codex_pk] codex succeeded on attempt $i" >&2
-    cat "$OUT_FILE"
-    exit 0
+CODEX_RC=0
+if [ "$BREAKER_OPEN" -eq 0 ]; then
+  for i in $(seq 1 "$ATTEMPTS"); do
+    echo "[codex_pk] codex attempt $i/$ATTEMPTS (stall=${STALL_SECS}s cap=${MAX_SECS}s)" >&2
+    run_codex_once "$i"; CODEX_RC=$?
+    if [ "$CODEX_RC" -eq 0 ]; then
+      echo "[codex_pk] codex succeeded on attempt $i" >&2
+      # A success clears a stale breaker file left by an earlier expired trip.
+      rm -f "$BREAKER_FILE"
+      cat "$OUT_FILE"
+      exit 0
+    fi
+  done
+  # rc 2 = stalled (no output), rc 3 = hard cap. Both are "codex is hung", which is what the
+  # breaker exists for. rc 4 (exited non-zero / too little output) is a normal failure — it
+  # costs seconds, not minutes, so it does NOT trip the breaker.
+  if [ "$CODEX_RC" -eq 2 ] || [ "$CODEX_RC" -eq 3 ]; then
+    trip_breaker "$([ "$CODEX_RC" -eq 2 ] && echo stalled || echo hard_cap)"
+    echo "[codex_pk] breaker TRIPPED — next ${BREAKER_SECS}s of calls skip codex" >&2
   fi
-done
+  echo "[codex_pk] all $ATTEMPTS codex attempts failed — falling back to DeepSeek PK" >&2
+fi
 
-echo "[codex_pk] all $ATTEMPTS codex attempts failed — falling back to DeepSeek PK" >&2
-if bash "$HERE/deepseek_pk_challenge.sh" "$PROMPT_FILE" > "$OUT_FILE.ds" 2>"$OUT_FILE.dserr"; then
+# The first line names who ACTUALLY answered, so the caller labels the review honestly instead
+# of writing "R3=codex" over a round codex never ran. Breaker-skips say so explicitly.
+if [ "$BREAKER_OPEN" -eq 1 ]; then
+  FALLBACK_LABEL="deepseek-fallback (codex breaker open — hung ${age}s ago, not retried)"
+else
+  FALLBACK_LABEL="deepseek-fallback (codex hung/failed ${ATTEMPTS}x)"
+fi
+# Overridable so the breaker test can exercise the full path without spending a real DeepSeek
+# call. Production never sets it.
+FALLBACK_SH="${CODEX_PK_FALLBACK:-$HERE/deepseek_pk_challenge.sh}"
+if bash "$FALLBACK_SH" "$PROMPT_FILE" > "$OUT_FILE.ds" 2>"$OUT_FILE.dserr"; then
   {
-    echo "CHALLENGER: deepseek-fallback (codex hung/failed ${ATTEMPTS}x)"
+    echo "CHALLENGER: $FALLBACK_LABEL"
     cat "$OUT_FILE.ds"
   } > "$OUT_FILE"
   cat "$OUT_FILE"
