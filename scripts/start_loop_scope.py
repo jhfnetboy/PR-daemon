@@ -329,10 +329,48 @@ def compute_scope(limit: int, scope_all: bool) -> Scope:
     return Scope(pins, pinned_hits, default_hits, ordered, pending)
 
 
-def cmd_targets(limit: int, scope_all: bool) -> int:
+def resolve_only(only: str) -> list[str]:
+    """Resolve a comma-separated --only list to canonical OWNER/REPO, same rules as `pins add`.
+
+    Added 2026-08-06. Before this, narrowing a patrol to one repo meant hand-writing the repo name
+    into the cron prompt — which is exactly the "second source of scope" the ONE-list consolidation
+    exists to prevent: `$pr list` could not see it, and nothing kept it in sync with repos.conf.
+    Narrowing now goes through this one command like everything else.
+    """
+    names = [n.strip() for n in only.split(",") if n.strip()]
+    if not names:
+        sys.exit("error: --only given but empty")
+    return [resolve(n) for n in names]
+
+
+def cmd_targets(limit: int, scope_all: bool, only: str = "") -> int:
+    # Resolve BEFORE compute_scope: that call runs `poll_prs.py --sync --max 200` (up to 600s, and
+    # --sync WRITES the queue DB) plus a scoped sync per out-of-org pin. A typo'd --only name used
+    # to burn all of that before exiting.
+    wanted = resolve_only(only) if only else []
+
     scope = compute_scope(limit, scope_all)
     pin_set = set(scope.pins)
     targets = scope.targets
+
+    if only:
+        # Filter `ordered` (every repo with pending PRs), NOT `targets` (already capped at the
+        # top-N recency window). Filtering `targets` silently dropped a named repo that has
+        # pending PRs but lost the top-8 race — and then printed "无待审" about it, which is a
+        # lie the patrol acts on: it would scan nothing and self-stop after an idle hour while
+        # that repo had PRs waiting. Masked whenever the repo happened to be pinned (pins bypass
+        # the cap), so it failed intermittently. --only IS the cap; the limit has no job left.
+        kept = [r for r in scope.ordered if r in wanted]
+        idle = [r for r in wanted if r not in kept]
+        print(
+            "ONLY: narrowed to %s%s"
+            % (
+                ", ".join(nick(r) for r in wanted),
+                "  (无待审: %s)" % ", ".join(nick(r) for r in idle) if idle else "",
+            ),
+            file=sys.stderr,
+        )
+        targets = kept
 
     # SCOPE line: what this cycle will actually watch, in the short names jason
     # uses. Printed to stderr so stdout stays a clean machine-readable target list.
@@ -342,21 +380,33 @@ def cmd_targets(limit: int, scope_all: bool) -> int:
         pin_mark = "📌" if repo in pin_set else ""
         parts.append(f"{pin_mark}{nick(repo)}#{','.join(str(n) for n in nums)}")
     print("SCOPE: " + ("  ".join(parts) if parts else "(无待审 PR)"), file=sys.stderr)
-    print(
-        "targets: %d pinned + %d recent (of %d repos with pending PRs)"
-        % (len(scope.pinned_hits), len(scope.default_hits), len(scope.ordered)),
-        file=sys.stderr,
-    )
+    if only:
+        # Derive the summary from the NARROWED list. The un-narrowed counts sat two lines above an
+        # empty target list and contradicted the SCOPE line right above them.
+        print(
+            "targets: %d selected by --only (of %d repos with pending PRs)"
+            % (len(targets), len(scope.ordered)),
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "targets: %d pinned + %d recent (of %d repos with pending PRs)"
+            % (len(scope.pinned_hits), len(scope.default_hits), len(scope.ordered)),
+            file=sys.stderr,
+        )
     for repo in targets:
         print(repo)
     return 0
 
 
-def cmd_list(limit: int, scope_all: bool) -> int:
+def cmd_list(limit: int, scope_all: bool, only: str = "") -> int:
     """`$pr list` —— 给人看的扫描范围:默认 N 个是哪些、额外 pin 进来的是哪些。
 
     和 targets 走同一个 compute_scope,所以这里显示什么,下一轮就真扫什么。
     """
+    # Resolve before the sync, for the same reason as cmd_targets: compute_scope is a long,
+    # DB-writing network sweep and a typo'd name should fail in a second, not after it.
+    only_set = set(resolve_only(only)) if only else set()
     scope = compute_scope(limit, scope_all)
 
     def line(repo: str) -> str:
@@ -380,6 +430,23 @@ def cmd_list(limit: int, scope_all: bool) -> int:
             nums = scope.prs(repo)
             prs = "#" + ",".join(str(n) for n in nums) if nums else ""
             print(f"  {mark} {nick(repo):<12} {prs:<16} {repo}")
+
+    if only_set:
+        # Narrowing must be VISIBLE when you ask for it. NOTE what this does NOT do: --only is not
+        # persisted anywhere, so a bare `$pr list` cannot know a running patrol is narrowed — this
+        # warning only appears when you re-type --only yourself. Making bare `list` tell the truth
+        # needs `$pr start` to record the active narrowing; until then this is a smaller claim than
+        # "list can no longer disagree with the patrol".
+        print(
+            "\n⚠️  本轮巡检被 --only 收窄到: "
+            + ", ".join(sorted(nick(r) for r in only_set))
+            + "\n   (上面列出的其余仓库本轮不扫;去掉 --only 即恢复完整范围)"
+        )
+        # Under --only, `ordered` (all repos with pending PRs) is the right denominator and the
+        # top-N cap is irrelevant, so the "没进前 N" clause would be meaningless here.
+        scanned = [r for r in scope.ordered if r in only_set]
+        print(f"\n本轮实扫 {len(scanned)} 个仓库(--only 收窄自 {len(scope.ordered)} 个有待审 PR 的仓库)")
+        return 0
 
     dropped = len(scope.ordered) - len(scope.pinned_hits) - len(scope.default_hits)
     print(f"\n本轮实扫 {len(scope.targets)} 个仓库"
@@ -409,10 +476,18 @@ def main() -> int:
         dest="scope_all",
         help="scope `all`: no cap, plus jhfnetboy/NextStop and jhfnetboy/AISalesMan",
     )
+    p_targets.add_argument(
+        "--only",
+        default="",
+        help="narrow this cycle to these repos only, comma-separated "
+             "(bare names or OWNER/REPO, e.g. --only coliving,cmic). "
+             "Use this instead of hand-writing repo names into a cron prompt.",
+    )
 
     p_list = sub.add_parser("list", help="human-readable scan scope (default slots + pinned extras)")
     p_list.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="0 = no cap")
     p_list.add_argument("--all", action="store_true", dest="scope_all", help="scope `all`")
+    p_list.add_argument("--only", default="", help="show the scope as narrowed by --only")
 
     p_nick = sub.add_parser("nick", help="print the short name for OWNER/REPO")
     p_nick.add_argument("repo")
@@ -424,10 +499,10 @@ def main() -> int:
         return 0
 
     if args.cmd == "targets":
-        return cmd_targets(args.limit, args.scope_all)
+        return cmd_targets(args.limit, args.scope_all, args.only)
 
     if args.cmd == "list":
-        return cmd_list(args.limit, args.scope_all)
+        return cmd_list(args.limit, args.scope_all, args.only)
 
     pins = load_pins()
     if args.action == "list":
