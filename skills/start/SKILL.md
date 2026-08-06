@@ -229,15 +229,16 @@ Step D — Cycle report + idle bookkeeping:
   lives in the GitHub comment. The ONE exception is the mandatory per-PR self-assessment
   block that pr itself requires; that still applies.
 
-Idle check — ask "how long since the last sign of progress?", NOT "how many cycles reviewed nothing":
-```bash
-python3 scripts/idle_state.py check --window-minutes 60
-```
+Idle check — ask "how long since the last sign of progress?", NOT "how many cycles reviewed nothing".
+Run (NO nested code fence here — this whole template is one fenced block, and an inner fence would
+close it early and cut off everything below, including the auto-stop and the lock removal):
+  python3 scripts/idle_state.py check --window-minutes 60
   exit 0 -> still active, continue
   exit 3 -> idle for over an hour:
     CronList -> find the job whose prompt contains "[[start-loop]]" -> CronDelete it.
     Print: "start-loop: idle 1h+, auto-stopped." Then stop — do not schedule anything else.
-Remove the lock file (`rm -f "$LOCK"`), then append exactly one line:
+  any other exit -> treat as undecidable: do NOT stop the patrol, print the script's stderr.
+Remove the lock file (`rm -f "$LOCK"`) on EVERY path above, then append exactly one line:
 "start-loop: reviewed <k> PR(s), <minutes_since_progress from idle_state.py> min since last post".
 ```
 
@@ -248,7 +249,9 @@ Remove the lock file (`rm -f "$LOCK"`), then append exactly one line:
 > done real work. `idle_state.py` reads the newest `finished_at` in `model_review_runs` — a review
 > that actually posted, whoever triggered it. Same correction as the Step 4 lock: the number has
 > to mean "time since the last sign of progress", not "time since some counter was last reset".
-> `start-loop-idle.json` is retired; nothing reads it any more.
+> `start-loop-idle.json` is retired. Note the caveat: `CronCreate` bakes the prompt at creation
+> time, so a patrol job scheduled BEFORE this change still carries the old `idle_rounds` block and
+> keeps writing that file. Nothing changes until `$pr start` is re-run and the job recreated.
 
 ## Step 5 — Confirm to the user
 

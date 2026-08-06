@@ -136,5 +136,61 @@ seed([(None, "2026-08-06 13:00:00")])
 r = run("check", "--window-minutes", "60", "--now", NOW)
 want("historical NULL row still yields a timestamp", "last_progress_at" in r.stdout, r.stdout)
 
+print("[7] THE PRODUCTION SHAPE: old DB rows + a fresh baseline")
+# model-evals.sqlite is git-tracked with 1000+ rows, so "a fresh state dir" in this deployment
+# never means an empty DB — it means OLD rows plus a NEW baseline. `max()` must pick the baseline.
+# Test [4] only covered the empty-DB case, so mutating `max(marks)` -> `marks[0]` survived it.
+seed([("2026-08-01T09:00:00+07:00", "2026-08-01T09:00:00+07:00")])
+fresh2 = tmp / "fresh-state-2"
+run("baseline", state=fresh2)
+r = run("check", "--window-minutes", "60", "--now", NOW, state=fresh2)
+want("old rows + new baseline -> active", r.returncode == 0, f"rc={r.returncode} {r.stdout}")
+want("the baseline wins over the old row", json.loads(r.stdout)["source"] == "baseline", r.stdout)
+
+print("[8] the newest timestamp wins regardless of insert order")
+# `ORDER BY id DESC LIMIT 50` used to assume insert order tracks finished_at. Newest row FIRST
+# by id, then 60 old ones, is the shape that broke it.
+rows = [("2026-08-06T21:50:00+07:00", "2026-08-06T21:50:00+07:00")]
+rows += [("2026-08-01T09:00:00+07:00", "2026-08-01T09:00:00+07:00")] * 60
+seed(rows)
+r = run("check", "--window-minutes", "60", "--now", NOW)
+want("newest row at the LOWEST id is still found", r.returncode == 0, f"rc={r.returncode} {r.stdout}")
+want("~10 minutes, not 5 days", json.loads(r.stdout)["minutes_since_progress"] <= 11, r.stdout)
+
+print("[9] an unreadable DB fails OPEN, and says so")
+DB.unlink()
+lonely = tmp / "db-gone-state"
+run("baseline", state=lonely)
+# Age the baseline well past the window so the ONLY thing that could keep it active is the
+# refusal to act on a failed read.
+(lonely / "start-loop-baseline.json").write_text(
+    json.dumps({"started_at": "2026-08-06T10:00:00+00:00"}) + "\n")
+r = run("check", "--window-minutes", "60", "--now", NOW, state=lonely)
+want("does NOT stop the patrol on a failed DB read", r.returncode == 0, f"rc={r.returncode} {r.stdout}")
+want("distinguishable from a healthy idle answer", "unreadable" in r.stdout, r.stdout)
+want("names the DB problem", "no eval db" in r.stdout, r.stdout)
+
+print("[10] a malformed baseline file does not crash")
+for junk in ("[]", '"a string"', '{"started_at": 123}', "not json at all"):
+    bad_state = tmp / ("junk-" + str(abs(hash(junk)))[:6])
+    bad_state.mkdir(parents=True, exist_ok=True)
+    (bad_state / "start-loop-baseline.json").write_text(junk)
+    seed([("2026-08-06T21:40:00+07:00", "2026-08-06T21:40:00+07:00")])
+    r = run("check", "--window-minutes", "60", "--now", NOW, state=bad_state)
+    want(f"baseline {junk[:18]!r} -> no traceback",
+         r.returncode in (0, 3) and "Traceback" not in r.stderr, r.stderr[-200:])
+
+print("[11] the window boundary is inclusive (>=), as documented")
+seed([("2026-08-06T21:00:00+07:00", "2026-08-06T21:00:00+07:00")])   # exactly 60 min before NOW
+r = run("check", "--window-minutes", "60", "--now", NOW)
+want("exactly at the window counts as idle", r.returncode == 3, f"rc={r.returncode} {r.stdout}")
+
+print("[12] a FUTURE timestamp is clamped and flagged, not printed as negative")
+seed([("2026-08-06T23:00:00+07:00", "2026-08-06T23:00:00+07:00")])
+r = run("check", "--window-minutes", "60", "--now", NOW)
+out = json.loads(r.stdout)
+want("no negative minutes", out["minutes_since_progress"] >= 0, r.stdout)
+want("clock skew is flagged", "clock_skew" in out, r.stdout)
+
 print(f"\npassed: {PASS}   failed: {FAIL}")
 sys.exit(1 if FAIL else 0)
