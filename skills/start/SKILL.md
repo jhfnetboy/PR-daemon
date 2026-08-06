@@ -34,16 +34,23 @@ Two families of invocation — **pin management** (Path A) and **scheduling** (P
 
 **Path B — scheduling** (everything else):
 
-- `$start` → interval=10, scope=`top8`
-- `$start all` → interval=10, scope=`all`
+- `$start` → interval=20, scope=`top8`
+- `$start all` → interval=20, scope=`all`
 - `$start 5m` / `$start 5` → interval=5, scope=`top8`
 - `$start 5m all` / `$start all 5m` → interval=5, scope=`all`
 - Interval token: integer, optional trailing `m`. **Snap to the nearest value in
   `{1,2,3,4,5,6,10,12,15,20,30}`** (these are the only minute counts that divide 60 evenly, so
   `N-59/N` spacing stays uniform all the way through the hour boundary — anything else creates
   an uneven gap once per hour and also breaks the `idle_rounds * N >= 60` self-stop math). Anything
-  unparsable → default 10. If the requested number isn't in the set, silently use the closest one
+  unparsable → default 20. If the requested number isn't in the set, silently use the closest one
   and mention the substitution in the Step 5 confirmation.
+
+> **Why the default is 20, not 10** (measured 2026-08-06 over an 11-PR patrol): one 4-round review runs
+> **18–26 minutes** wall-clock, and a cycle with several queued PRs ran **70 minutes**. At a 10-minute
+> interval every fire that landed during a review was a wasted no-op skip, and the lock — refreshed only
+> at cycle start — went stale mid-cycle, so a second cycle could have started concurrently (it had to be
+> hand-touched to prevent that). 20 minutes matches one review, so a fire normally lands *between*
+> reviews rather than inside one. See the Step 4 lock-refresh rule, which fixes the stale-lock half.
 
 ## Step 0 — Pin management (Path A only)
 
@@ -68,7 +75,7 @@ Then:
 - If a `[[start-loop]]` cron job already exists → **nothing else to do.** The fired
   prompt recomputes targets from scratch every cycle, so the new pin is picked up on the
   next fire. Confirm the pin plus the existing job's id/interval and stop.
-- If no patrol job exists → continue into Path B with the defaults (interval=10,
+- If no patrol job exists → continue into Path B with the defaults (interval=20,
   scope=`top8`) so the pin actually gets patrolled.
 
 ## Step 1 — Check for an existing patrol job (avoid duplicates)
@@ -130,6 +137,12 @@ Three fixes learned from an adversarial Codex pass on an earlier draft are baked
 - **Overlap lock**: at `4-59/N` this job can fire again before a slow 4-round review finishes.
   Without a lock, two overlapping fires can double-post a review or race the SQLite/idle-JSON
   writes. A simple mtime-based lock file guards this.
+  ⚠️ **The lock must be REFRESHED after every PR, not only at cycle start** (added 2026-08-06 after
+  a 70-minute cycle). Its mtime has to mean "time since the last sign of progress"; if it only ever
+  means "time since the cycle began", any cycle longer than `3 × interval` lets the lock go stale and
+  a second cycle starts *on top of a running one* — exactly what the lock exists to prevent. Today
+  that had to be worked around by hand-`touch`ing the lock mid-cycle. The template's Step C now
+  touches it after each PR.
 - **"Needs review" is read off `last_reviewed_head_oid != head_oid`, never the `status`
   column.** `poll_prs.py`'s unscoped `--sync` marks every open row it didn't just see as
   `closed`, including rows outside the 3 orgs — so a pinned out-of-org repo gets spuriously
@@ -198,6 +211,11 @@ For each repo from Step A+B's stdout, in the order printed:
   any repo that is not on this cycle's printed target list.
   Keep a running total `k` of PRs actually reviewed (posted a verdict for) across all repos
   this cycle, then move to the next target repo.
+
+  🔒 **After EACH PR's verdict is posted, refresh the lock: `touch "$LOCK"`.** Its mtime must mean
+  "time since the last sign of progress", not "time since this cycle started" — a cycle with several
+  queued PRs runs far longer than `3 × interval` (measured: 70 minutes), and without this the lock
+  goes stale mid-cycle and the next fire starts a SECOND cycle on top of the running one.
 
 Step D — Cycle report + idle bookkeeping:
 
