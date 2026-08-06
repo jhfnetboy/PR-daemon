@@ -41,7 +41,7 @@ Two families of invocation — **pin management** (Path A) and **scheduling** (P
 - Interval token: integer, optional trailing `m`. **Snap to the nearest value in
   `{1,2,3,4,5,6,10,12,15,20,30}`** (these are the only minute counts that divide 60 evenly, so
   `N-59/N` spacing stays uniform all the way through the hour boundary — anything else creates
-  an uneven gap once per hour and also breaks the `idle_rounds * N >= 60` self-stop math). Anything
+  an uneven gap once per hour). Anything
   unparsable → default 20. If the requested number isn't in the set, silently use the closest one
   and mention the substitution in the Step 5 confirmation.
 
@@ -101,15 +101,17 @@ continuing. `./watch.sh stop` kills only the watcher; a `claude -p` review subpr
 already launched keeps running to completion. Let that one finish rather than leaving
 half-written state, and say so.
 
-## Step 2 — Reset idle bookkeeping + clear any stale lock
+## Step 2 — Record the start baseline + clear any stale lock
 
 ```bash
 mkdir -p /Users/jason/Dev/tools/PR-Daemon/.state/pr-daemon
-cat > /Users/jason/Dev/tools/PR-Daemon/.state/pr-daemon/start-loop-idle.json <<'EOF'
-{"idle_rounds": 0}
-EOF
+python3 /Users/jason/Dev/tools/PR-Daemon/scripts/idle_state.py baseline
 rm -f /Users/jason/Dev/tools/PR-Daemon/.state/pr-daemon/start-loop.lock
 ```
+
+The baseline exists for one case: a state dir with **no** recorded runs at all. Without it the
+Step-D idle check has no timestamp to measure from, and a brand-new patrol would read as
+"idle since the epoch" and stop itself on its first tick.
 
 Clearing the lock here matters because it's the one file a crashed/killed prior fire could have
 left behind — a fresh `$start` invocation should never inherit a stale lock from a dead cycle.
@@ -227,15 +229,29 @@ Step D — Cycle report + idle bookkeeping:
   lives in the GitHub comment. The ONE exception is the mandatory per-PR self-assessment
   block that pr itself requires; that still applies.
 
-Read .state/pr-daemon/start-loop-idle.json ({"idle_rounds": N}).
-  - k == 0 this cycle -> idle_rounds += 1
-  - k >= 1 this cycle -> idle_rounds = 0
-Write the updated value back to the same file. Remove the lock file (`rm -f "$LOCK"`).
-If idle_rounds * <N> >= 60:
-  CronList -> find the job whose prompt contains "[[start-loop]]" -> CronDelete it.
-  Print: "start-loop: idle 1h+, auto-stopped." Then stop — do not schedule anything else.
-Else append exactly one line: "start-loop: reviewed <k> PR(s), idle_rounds=<idle_rounds>/<60/N rounded>".
+Idle check — ask "how long since the last sign of progress?", NOT "how many cycles reviewed nothing".
+Run (NO nested code fence here — this whole template is one fenced block, and an inner fence would
+close it early and cut off everything below, including the auto-stop and the lock removal):
+  python3 scripts/idle_state.py check --window-minutes 60
+  exit 0 -> still active, continue
+  exit 3 -> idle for over an hour:
+    CronList -> find the job whose prompt contains "[[start-loop]]" -> CronDelete it.
+    Print: "start-loop: idle 1h+, auto-stopped." Then stop — do not schedule anything else.
+  any other exit -> treat as undecidable: do NOT stop the patrol, print the script's stderr.
+Remove the lock file (`rm -f "$LOCK"`) on EVERY path above, then append exactly one line:
+"start-loop: reviewed <k> PR(s), <minutes_since_progress from idle_state.py> min since last post".
 ```
+
+> **Why this replaced the `idle_rounds` counter (2026-08-06).** The counter measured *cycles that
+> reviewed nothing*, which is not the same thing. That day two PRs were reviewed and posted **at
+> the user's direct request**, outside any cron cycle; every cycle still saw `k == 0`, so
+> `idle_rounds` climbed 0→3 and the patrol stopped itself an hour after a session that had just
+> done real work. `idle_state.py` reads the newest `finished_at` in `model_review_runs` — a review
+> that actually posted, whoever triggered it. Same correction as the Step 4 lock: the number has
+> to mean "time since the last sign of progress", not "time since some counter was last reset".
+> `start-loop-idle.json` is retired. Note the caveat: `CronCreate` bakes the prompt at creation
+> time, so a patrol job scheduled BEFORE this change still carries the old `idle_rounds` block and
+> keeps writing that file. Nothing changes until `$pr start` is re-run and the job recreated.
 
 ## Step 5 — Confirm to the user
 
