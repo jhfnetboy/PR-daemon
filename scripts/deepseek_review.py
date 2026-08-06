@@ -18,6 +18,41 @@ from urllib.error import URLError, HTTPError
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# ── Incremental re-review block (added 2026-08-06) ──────────────────────────────────────────
+# Injected only when --prior-review is passed. Rationale, measured on CoLivingOS#74 + #75:
+# on an incremental round the real blocking findings were BOTH residue of the previous round —
+# a finding fixed in one place and missed in another. The missed place is, by definition, not in
+# the new diff, so a diff-only pass cannot reach it. R1a scored 0/4 then 0/1 on those two rounds.
+# This block is what makes the漏改点 class reachable at all.
+PRIOR_REVIEW_BLOCK = """
+════════════════════════════════════════════════════════════════════════════
+THIS IS AN INCREMENTAL RE-REVIEW. The diff below is ONLY what changed since our last review.
+The text below is the review WE posted last round. The author's new commits claim to address it.
+
+⚠️ YOUR HIGHEST-VALUE JOB THIS ROUND is the FOLLOW-UP CHECK, not the diff:
+
+For EVERY finding in the prior review, decide one of:
+  · FIXED     — the new diff fully addresses it
+  · PARTIAL   — addressed in one place, MISSED somewhere else  ← report this, at the ORIGINAL severity
+  · NOT FIXED — untouched                                       ← report this, at the ORIGINAL severity
+
+A PARTIAL fix is the single most common defect on an incremental round, and it is usually
+INVISIBLE IN THE DIFF: the surviving wrong line was not touched by these commits, so it does not
+appear below. Do NOT restrict yourself to changed lines for this check — if the prior review named
+a file:line, reason about whether the fix would have had to touch OTHER places too (a summary
+sentence, a second call site, a duplicated spec, a downstream doc), and say which ones to verify.
+When you cannot confirm from the diff, emit an explicit VERIFY line naming the exact file and what
+to grep for — a precise "check this" beats both a false CONFIRM and silence.
+
+Report follow-up results in FINDINGS using this shape:
+  [Sev] file:line — FOLLOW-UP <prior finding in <=8 words>: PARTIAL/NOT FIXED — <what survives> | fix
+  [Sev] file:line — VERIFY <what to check> | <how to check it>
+
+PRIOR REVIEW:
+{prior}
+════════════════════════════════════════════════════════════════════════════
+"""
+
 SECURITY_PROMPT = """You are R1b of a multi-round PK code review — security-only lens.
 Examine ONLY security concerns in the diff below. Output EXACTLY these sections and NOTHING else.
 
@@ -266,15 +301,61 @@ def main():
     pr = args[args.index("--pr") + 1] if "--pr" in args else "?"
     output = args[args.index("--output") + 1] if "--output" in args else None
     mode = args[args.index("--mode") + 1] if "--mode" in args else "full"
+    prior_file = args[args.index("--prior-review") + 1] if "--prior-review" in args else None
+    # Assemble the prompt and print it instead of calling the API. Exists so prompt assembly
+    # (especially the incremental block) is testable offline, without spend.
+    print_prompt = "--print-prompt" in args
 
     key = load_key()
-    if not key:
+    if not key and not print_prompt:
         sys.stderr.write("❌ no DEEPSEEK_API_KEY\n")
         sys.exit(1)
 
     diff = Path(diff_file).read_text()
     template = SECURITY_PROMPT if mode == "security" else PROMPT
     prompt = template.format(repo=repo, pr=pr, diff=diff)
+
+    if prior_file:
+        # fetch_prior_review.py exits 3 and writes NO file on a first-time review — the normal
+        # case. An uncaught FileNotFoundError here would kill the whole review round for it.
+        try:
+            prior = Path(prior_file).read_text().strip()
+        except OSError as e:
+            sys.stderr.write(
+                f"⚠️  --prior-review {prior_file} unreadable ({e}) — running as a fresh review\n"
+            )
+            prior = ""
+        if prior and mode == "security":
+            # R1b's contract is "output EXACTLY these two/these sections and NOTHING else", with a
+            # FAST EXIT that stops after two lines. The follow-up block declares a different job
+            # and a different section name (FINDINGS, not SECURITY_FINDINGS), and it is prepended
+            # ABOVE that contract — the combination is self-contradicting, and `_dedup_findings`
+            # plus the downstream pipeline key on SECURITY_FINDINGS. R1b stays a pure security
+            # lens; the follow-up check belongs to R1a.
+            sys.stderr.write(
+                "[deepseek R1b] --prior-review ignored in security mode — "
+                "the follow-up check runs in R1a\n"
+            )
+            prior = ""
+        if prior:
+            # Prepended, not appended: the follow-up instructions must be read BEFORE the diff,
+            # and a long diff would otherwise push them past the model's attention. The prior body
+            # is capped because a verbose review can dwarf the diff it is about — the findings live
+            # at the top of our review bodies, so a head-cut keeps what matters.
+            if len(prior) > 12000:
+                prior = prior[:12000] + "\n…(prior review truncated at 12k chars)…"
+            prompt = PRIOR_REVIEW_BLOCK.format(prior=prior) + prompt
+            sys.stderr.write(f"[deepseek R1] incremental mode: {len(prior)} chars of prior review\n")
+        elif mode != "security":
+            sys.stderr.write(f"⚠️  --prior-review {prior_file} is empty — running as a fresh review\n")
+
+    if print_prompt:
+        sys.stdout.write(prompt)
+        # Honor --output here too: silently ignoring it made `--print-prompt --output F` exit 0
+        # without ever creating F, which reads as success to a caller wiring the two together.
+        if output:
+            Path(output).write_text(prompt)
+        return
 
     import os
     model = os.environ.get("PR_DAEMON_FIRST_PASS_MODEL") or "deepseek-v4-flash"
