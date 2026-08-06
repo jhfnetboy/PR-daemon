@@ -60,7 +60,7 @@ out1="$(bash "$SCRIPT" "$TMP/prompt.txt" "$TMP/out1.txt" 2>"$TMP/err1.txt")"
 d1=$(( $(date +%s) - t0 ))
 check "codex was invoked" "$(calls)" "1"
 [ -f "$CODEX_BREAKER_FILE" ] && ok "breaker file written" || bad "breaker file missing"
-grep -q '"reason":"stalled"' "$CODEX_BREAKER_FILE" && ok "reason recorded as stalled" \
+grep -q '"reason":"silent_stall"' "$CODEX_BREAKER_FILE" && ok "reason recorded as silent_stall" \
   || bad "reason not recorded (got: $(cat "$CODEX_BREAKER_FILE" 2>/dev/null))"
 echo "$out1" | grep -q "STUB FALLBACK VERDICT" && ok "fell back to the challenger stub" \
   || bad "no fallback output"
@@ -104,6 +104,63 @@ bash "$SCRIPT" "$TMP/prompt.txt" "$TMP/out4.txt" >/dev/null 2>"$TMP/err4.txt"
 check "codex was invoked" "$(calls)" "3"
 [ -f "$CODEX_BREAKER_FILE" ] && bad "breaker tripped on a fast failure (it should not)" \
   || ok "breaker NOT tripped on a fast failure"
+
+# ── 6. hard cap on a STREAMING run must NOT trip ────────────────────────────
+# The incident that motivated this whole feature was NOT a hang: the preserved artifact is
+# 99,590 bytes of real streaming analysis, killed at the hard cap while still working. Tripping
+# on rc=3 would disable the strongest challenger for 30 minutes because one PR was slow.
+echo "[5] hard cap while streaming does NOT trip the breaker"
+rm -f "$CODEX_BREAKER_FILE"
+cat > "$TMP/bin/codex" <<EOF
+#!/usr/bin/env bash
+echo call >> "$CALLS"
+# Emit steadily so the stall detector never fires; only the hard cap can stop this.
+while :; do echo "streaming real analysis output ................................"; sleep 1; done
+EOF
+chmod +x "$TMP/bin/codex"
+before=$(calls)
+CODEX_MAX_SECS=8 CODEX_STALL_SECS=6 bash "$SCRIPT" "$TMP/prompt.txt" "$TMP/out5.txt" >/dev/null 2>"$TMP/err5.txt"
+check "codex was invoked" "$(calls)" "$((before + 1))"
+[ -f "$CODEX_BREAKER_FILE" ] && bad "breaker tripped on a hard cap (codex was streaming, not hung)" \
+  || ok "breaker NOT tripped on a hard cap"
+grep -q "was working, not hung" "$TMP/err5.txt" && ok "log says codex was working" \
+  || bad "no explanatory log line: $(tail -2 "$TMP/err5.txt")"
+
+# ── 7. a stall AFTER substantial output is slow, not hung ───────────────────
+echo "[6] stalling after real output does NOT trip the breaker"
+rm -f "$CODEX_BREAKER_FILE"
+cat > "$TMP/bin/codex" <<EOF
+#!/usr/bin/env bash
+echo call >> "$CALLS"
+# ~4KB up front (over CODEX_SILENT_BYTES), then go quiet -> stall detector fires.
+for i in \$(seq 1 60); do echo "real analysis line ................................................"; done
+sleep 600
+EOF
+chmod +x "$TMP/bin/codex"
+before=$(calls)
+bash "$SCRIPT" "$TMP/prompt.txt" "$TMP/out6.txt" >/dev/null 2>"$TMP/err6.txt"
+check "codex was invoked" "$(calls)" "$((before + 1))"
+[ -f "$CODEX_BREAKER_FILE" ] && bad "breaker tripped after codex produced real output" \
+  || ok "breaker NOT tripped after real output"
+grep -q "slow, not hung" "$TMP/err6.txt" && ok "log distinguishes slow from hung" \
+  || bad "no slow-not-hung log: $(tail -2 "$TMP/err6.txt")"
+
+# ── 8. a future mtime must not disable codex for months ─────────────────────
+echo "[7] a future-dated breaker file is discarded, not honored"
+printf '{"tripped_at":"?","reason":"?"}\n' > "$CODEX_BREAKER_FILE"
+touch -t 202801010000 "$CODEX_BREAKER_FILE"
+cat > "$TMP/bin/codex" <<EOF
+#!/usr/bin/env bash
+echo call >> "$CALLS"
+echo "boom" >&2
+exit 1
+EOF
+chmod +x "$TMP/bin/codex"
+before=$(calls)
+bash "$SCRIPT" "$TMP/prompt.txt" "$TMP/out7.txt" >/dev/null 2>"$TMP/err7.txt"
+check "codex was probed, not skipped" "$(calls)" "$((before + 1))"
+grep -q "unusable" "$TMP/err7.txt" && ok "future mtime is called out" \
+  || bad "future mtime not handled: $(tail -2 "$TMP/err7.txt")"
 
 echo
 echo "passed: $PASS   failed: $FAIL"
