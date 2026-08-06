@@ -11,7 +11,7 @@ Usage:
   python3 scripts/deepseek_review.py --diff-file /tmp/pr.diff --repo OWNER/REPO --pr N --output /tmp/r1.md
 """
 
-import sys, json, time
+import sys, json, time, re
 from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
@@ -166,34 +166,97 @@ def load_key():
     return ""
 
 
+# A finding line as the model actually emits it: an optional list number, then `[Sev]`.
+# The previous version guarded on `stripped.startswith("[")` and therefore matched NOTHING —
+# every real line looks like `1. [High] src/x.ts:12 — …`. Measured on CoLivingOS#74: 159 emitted
+# lines, 0 matched, 0 removed. The `lstrip("0123456789. ")` two lines below shows numbering was
+# always intended; the guard just never let a numbered line reach it.
+_FINDING_RE = re.compile(r"^\s*(?:\d+[.)]\s*)?\[", re.ASCII)
+# `SECURITY_FINDINGS:` does not start with `FINDINGS:`, so R1b was never deduped either.
+_FINDINGS_HEADERS = ("FINDINGS:", "SECURITY_FINDINGS:")
+_FINDINGS_ENDERS = ("TRIAGE:", "SECURITY_TRIAGE:", "SKELETON:", "FILES:")
+# `[Sev] path/to/file.ts:123` — the location a finding is about.
+_LOC_RE = re.compile(r"\[[^\]]*\]\s*([^\s—|]+)", re.ASCII)
+
+# Past this many findings for ONE location, the model is looping rather than reporting.
+_MAX_PER_LOCATION = 6
+# Past this many findings total, treat the whole response as degenerate.
+_DEGENERATE_TOTAL = 40
+
+
 def _dedup_findings(content: str) -> str:
-    """Remove duplicate FINDINGS lines (same root cause repeated by the model)."""
+    """Collapse repeated FINDINGS / SECURITY_FINDINGS lines and flag degenerate output.
+
+    Two failure modes are handled, both observed in production:
+      1. byte-identical repeats — R1b emitted the same Low six times;
+      2. a repetition LOOP that cycles 3-4 near-identical variants of one claim so no two lines
+         are equal — R1a on CoLivingOS#74 emitted 159 lines that collapsed to 4 distinct claims,
+         all on `statements.ts:214`.
+
+    Only duplicates are dropped: every DISTINCT claim survives, so nothing a later round could
+    have acted on is lost. When the output is degenerate the response is annotated rather than
+    silently cleaned — a quietly-tidied loop would enter the flash performance record looking
+    like a normal round, which is exactly the comparison that record exists to support. It is
+    also NOT retried here: a silent retry would hide the datapoint and double the spend.
+    """
     lines = content.splitlines(keepends=True)
     in_findings = False
     seen: set[str] = set()
+    per_location: dict[str, int] = {}
+    raw_findings = 0
+    capped_locations: set[str] = set()
     out = []
     for line in lines:
         stripped = line.strip()
-        if stripped.startswith("FINDINGS:"):
+        if stripped.startswith(_FINDINGS_HEADERS):
             in_findings = True
             out.append(line)
             continue
-        if in_findings and stripped.startswith(("TRIAGE:", "SKELETON:", "FILES:")):
+        if in_findings and stripped.startswith(_FINDINGS_ENDERS):
             in_findings = False
-        if in_findings and stripped.startswith("["):
-            # Normalize: lowercase, collapse whitespace, drop leading number
-            key = stripped.lstrip("0123456789. ").lower()
-            # Use first ~60 chars as fingerprint (captures sev+file+issue)
-            fingerprint = key[:60]
-            if fingerprint in seen:
+        if in_findings and _FINDING_RE.match(stripped):
+            raw_findings += 1
+            key = stripped.lstrip("0123456789.) ").lower()
+            if key[:60] in seen:
                 continue
-            seen.add(fingerprint)
+            seen.add(key[:60])
+            # Distinct text, same place: after a few, this is a loop, not a finding list.
+            loc = _LOC_RE.search(key)
+            loc_key = loc.group(1) if loc else ""
+            if loc_key:
+                per_location[loc_key] = per_location.get(loc_key, 0) + 1
+                if per_location[loc_key] > _MAX_PER_LOCATION:
+                    capped_locations.add(loc_key)
+                    continue
         out.append(line)
-    deduped = len(lines) - len(out)
-    if deduped > 0:
-        import sys
-        sys.stderr.write(f"[deepseek R1] post-process: removed {deduped} duplicate finding line(s)\n")
-    return "".join(out)
+
+    result = "".join(out)
+    kept = raw_findings - (len(lines) - len(out))
+    degenerate = raw_findings >= _DEGENERATE_TOTAL or bool(capped_locations)
+    if raw_findings != kept:
+        sys.stderr.write(
+            f"[deepseek R1] post-process: {raw_findings} finding line(s) -> {kept} distinct\n"
+        )
+    if capped_locations:
+        sys.stderr.write(
+            f"[deepseek R1] post-process: capped at {_MAX_PER_LOCATION}/location for "
+            f"{', '.join(sorted(capped_locations))}\n"
+        )
+    if degenerate:
+        sys.stderr.write(
+            f"[deepseek R1] ⚠️  DEGENERATE OUTPUT — {raw_findings} raw findings collapsed to "
+            f"{kept}. Treat this round as a tool failure, not as signal, and say so in the "
+            f"self-assessment / model_eval_db record.\n"
+        )
+        # Machine-readable for the caller, and visible to any model handed this file.
+        result += (
+            f"\n<!-- R1_DEGENERATE raw={raw_findings} distinct={kept} "
+            f"locations={','.join(sorted(capped_locations)) or 'n/a'} -->\n"
+            f"> ⚠️ NOTE: the model emitted {raw_findings} finding lines that collapse to {kept} "
+            f"distinct claims — a repetition loop. The list above is the de-duplicated set. "
+            f"Record this round as degenerate.\n"
+        )
+    return result
 
 
 def main():
