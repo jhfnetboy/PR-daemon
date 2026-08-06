@@ -33,10 +33,15 @@ import subprocess
 import sys
 from pathlib import Path
 
-# GitHub returns reviews oldest-first. We want the most recent SUBSTANTIVE one — a bare APPROVE
-# with an empty body carries no findings to re-check, and picking it would silently produce an
-# empty prior-review block that looks like "nothing was raised last time".
+# We want the most recent SUBMITTED, SUBSTANTIVE review. A bare APPROVE with an empty body
+# carries no findings to re-check, and picking it would silently produce an empty prior-review
+# block that reads as "nothing was raised last time". Ordering is taken from `submittedAt`, never
+# from the array order — see the sort in fetch().
 MIN_BODY_CHARS = 40
+
+# States that are not "a review we posted": PENDING is an unsubmitted draft, DISMISSED was
+# explicitly retracted.
+SKIP_STATES = {"PENDING", "DISMISSED"}
 
 
 def fetch(repo: str, pr: int, user: str) -> tuple[str, str, str] | None:
@@ -62,9 +67,20 @@ def fetch(repo: str, pr: int, user: str) -> tuple[str, str, str] | None:
         r for r in reviews
         if (r.get("author") or {}).get("login", "").lower() == user.lower()
         and len(r.get("body") or "") >= MIN_BODY_CHARS
+        # A PENDING review is an UNSUBMITTED draft — `gh` returns the viewer's own drafts, and
+        # feeding scratch notes to R1 as "the review WE posted last round" is worse than feeding
+        # nothing. DISMISSED reviews were explicitly retracted, so they are not "what we said"
+        # either. Both were reproduced beating the real review before this filter existed.
+        and (r.get("state") or "").upper() not in SKIP_STATES
+        and r.get("submittedAt")
     ]
     if not mine:
         return None
+    # Sort by submittedAt rather than trusting array order. GraphQL orders reviews by database id
+    # (creation), not submission, so a review drafted earlier but submitted later sorts wrong —
+    # and the failure is SILENT: you get an older round's body labelled as the prior round, which
+    # is precisely the one thing this script must never get wrong.
+    mine.sort(key=lambda r: r.get("submittedAt") or "")
     last = mine[-1]
     return last.get("body", ""), last.get("state", "?"), last.get("submittedAt", "?")
 
@@ -79,6 +95,11 @@ def main() -> None:
 
     got = fetch(args.repo, args.pr, args.user)
     if got is None:
+        # Remove a stale --output from an earlier PR. Callers reuse fixed paths like
+        # /tmp/prior.md; leaving the previous PR's review there would let R1 silently ingest
+        # a DIFFERENT PR's findings as this PR's prior round.
+        if args.output:
+            Path(args.output).unlink(missing_ok=True)
         sys.stderr.write(
             f"[prior-review] no prior review by {args.user} on {args.repo}#{args.pr} — "
             f"this is a first-time review, run R1 without --prior-review\n"

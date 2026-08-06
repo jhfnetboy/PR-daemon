@@ -316,7 +316,27 @@ def main():
     prompt = template.format(repo=repo, pr=pr, diff=diff)
 
     if prior_file:
-        prior = Path(prior_file).read_text().strip()
+        # fetch_prior_review.py exits 3 and writes NO file on a first-time review — the normal
+        # case. An uncaught FileNotFoundError here would kill the whole review round for it.
+        try:
+            prior = Path(prior_file).read_text().strip()
+        except OSError as e:
+            sys.stderr.write(
+                f"⚠️  --prior-review {prior_file} unreadable ({e}) — running as a fresh review\n"
+            )
+            prior = ""
+        if prior and mode == "security":
+            # R1b's contract is "output EXACTLY these two/these sections and NOTHING else", with a
+            # FAST EXIT that stops after two lines. The follow-up block declares a different job
+            # and a different section name (FINDINGS, not SECURITY_FINDINGS), and it is prepended
+            # ABOVE that contract — the combination is self-contradicting, and `_dedup_findings`
+            # plus the downstream pipeline key on SECURITY_FINDINGS. R1b stays a pure security
+            # lens; the follow-up check belongs to R1a.
+            sys.stderr.write(
+                "[deepseek R1b] --prior-review ignored in security mode — "
+                "the follow-up check runs in R1a\n"
+            )
+            prior = ""
         if prior:
             # Prepended, not appended: the follow-up instructions must be read BEFORE the diff,
             # and a long diff would otherwise push them past the model's attention. The prior body
@@ -326,11 +346,15 @@ def main():
                 prior = prior[:12000] + "\n…(prior review truncated at 12k chars)…"
             prompt = PRIOR_REVIEW_BLOCK.format(prior=prior) + prompt
             sys.stderr.write(f"[deepseek R1] incremental mode: {len(prior)} chars of prior review\n")
-        else:
+        elif mode != "security":
             sys.stderr.write(f"⚠️  --prior-review {prior_file} is empty — running as a fresh review\n")
 
     if print_prompt:
         sys.stdout.write(prompt)
+        # Honor --output here too: silently ignoring it made `--print-prompt --output F` exit 0
+        # without ever creating F, which reads as success to a caller wiring the two together.
+        if output:
+            Path(output).write_text(prompt)
         return
 
     import os
