@@ -78,20 +78,42 @@ reviewer 手工实证发现,DeepSeek R1 两次都是 0 命中 + 假阳性。
 
 不是模型弱,是**喂进去的东西结构上不可能包含答案**。下面五条按性价比排序。
 
-### 5.1 增量复审要把「上一轮 review 正文」喂给 R1 🔴 最高性价比
+### 5.1 增量复审的漏改点 —— 喂 R1 试过了,不管用;该喂的是 Opus R2
 
 **问题**:增量复审的 blocking 几乎都是**漏改点** —— 上一轮提的 finding 只改了一半,
 剩下那半**不在这次的 diff 里**。只看 diff 的 R1,结构上就发现不了。
 CoLivingOS#75 两条 blocking(`TODO:68` 的总结句、`tasks.md:964/966` 的活规格)都是这一类。
 
-**方案**:`$pr` Step 2 之后、Step 3 之前插一步 —— 若 `last_reviewed_head_oid` 非空,
-用 `gh pr view N --json reviews` 取上一轮 review 正文,连同增量 diff 一起喂给 R1a,
-prompt 明确要求:**逐条核对上一轮每个 finding 是否已改干净,漏改点按原严重度报出**。
-R1b 不变。
+**已做(PR #3):** `scripts/fetch_prior_review.py` + `deepseek_review.py --prior-review FILE`,
+把上一轮 review 正文插在 diff **之前**,要求逐条判 FIXED/PARTIAL/NOT FIXED。
 
-- [ ] `scripts/fetch_prior_review.py`(取最近一条 clestons 的 review body)
-- [ ] `deepseek_review.py` 加 `--prior-review FILE`
-- [ ] SKILL.md Step 2 后插入这一步,并写明「增量复审时**必须**带」
+**⚠️ 实测结论:这个方案没有解决它想解决的问题。** 原来这条写着「🔴 最高性价比」,
+是我在**没有对照**的情况下写的 —— 第一次验证时我把自己刚写完的那条 review 喂了回去,
+它逐条复述了一遍,看起来很成功。那是循环论证。
+
+真做对照(只喂**上一轮**的 review,那一轮从没提过这两处):
+
+| 配置 | 找到 `TODO:68`? | 找到 `tasks.md:964/966`? |
+|---|:--:|:--:|
+| 增量 diff + 上一轮 review | ❌ | ❌ |
+| **`-U40` 加宽 diff**(两处都真的出现在喂进去的文本里,grep 验过)+ 上一轮 review | ❌ | ❌ |
+
+第二行才是关键:那两处**就在**它读到的文本里,它还是没找到,反而多了两条 "No issue" 的凑数行。
+所以瓶颈不是「看不到」,是 flash 在这类判断上不行。两轮实测 R1a 0/4、0/1,
+两次的 blocking 全部由 **Opus R2** 找到。
+
+**接下来该做的**(未做):把这套输入 —— 上一轮 review 正文 + `-U40` 加宽 diff ——
+喂给**实际找到东西的那一轮**,也就是 Opus R2,而不是继续加强 R1。
+
+- [x] `scripts/fetch_prior_review.py`
+- [x] `deepseek_review.py --prior-review FILE`
+- [ ] **R2 的 prompt 带上 prior review + 加宽 diff**(真正的杠杆)
+- [ ] 增量复审的 diff 默认 `-U40` 而非 `-U3`(漏改点通常紧挨着改对的那处)
+- [ ] SKILL.md Step 2 后插入取 prior review 这一步,写明增量复审必须带 ——
+      但别再宣称它能让 R1 抓到漏改点
+
+> 教训归教训,单独记一条:**验证一个「让模型发现 X」的改动时,不能把答案喂进去。**
+> 我第一次就是这么验的,并据此把它标成了最高性价比。
 
 ### 5.2 「回归测试不承重」应该做成机械检查,不该靠人肉
 
@@ -109,19 +131,36 @@ R1b 不变。
 - [ ] 接进 `$pr` 的 4-round 路径,作为 R2 之前的机械证据
 - [ ] 跑一段时间统计命中率,决定要不要推广到 2-round
 
-### 5.3 Codex 挂起税:一次烧 6 分钟,占单次 review 的 1/3
+### 5.3 Codex 那 366 秒 —— 不是挂起,是**正在干活时被硬上限杀掉**
 
-**问题**:CoLivingOS#74 的 R3,`codex exec` 挂起 366s 才回退到 DeepSeek,
-而整次 review 一共 1159s —— **31.6% 的时间花在等一个已经死了的进程**。
-`codex_pk.sh` 已经有 stall 检测,但每个 PR 都要重新付一次这个税。
+**原来写的**:「codex exec 挂起 366s 才回退,31.6% 的时间花在等一个已经死了的进程」。
+**这句是错的**,是我没看那次运行留下的产物就下的结论。
 
-**方案**:短期熔断。`codex_pk.sh` 挂起回退时写 `.state/pr-daemon/codex-breaker.json`
-(时间戳 + 原因);下次调用先读它,若距上次挂起 < 30 min 直接跳过 codex 走 DeepSeek,
-并在输出第一行注明 `CHALLENGER: deepseek (codex breaker open, tripped <时间>)`。
-熔断过期后自动放行一次试探。
+评审(PR #1 的对抗评审)翻出了 `pk-74.out.raw`:**99,590 字节**,codex banner、工具调用、
+一段 node 复现脚本打出的 jsSum/exactSum 对照表,结尾停在 `hook: PostToolUse`。
+mtime 21:58:46 → 22:04:38 ≈ 352s ≈ 360s 硬上限。它**从头到尾都在输出**,
+是被 `CODEX_MAX_SECS=360` 在干活的中途杀掉的。
 
-- [ ] `codex_pk.sh` 加熔断读写
-- [ ] 标签照实写(不能因为熔断就说「Codex 已跑」)
+逻辑上也该早点想到:stall 检测是「90s 没有新输出就杀」,那么能撑到硬上限的运行,
+按构造就是每 90s 内都有输出 —— 也就是「没挂」的定义。
+
+所以:
+- **那 366s 不是浪费在死进程上,是我们把一个快做完的 PK 挑战砍了。** 真正的损失是
+  #74 那轮 R3 本可以有真 Codex 的结论,却退化成了 DeepSeek 兜底。
+- **对 rc=3(硬上限)熔断是错的** —— 一个 PR 慢一点就把最强挑战者关掉 30 分钟。
+- 熔断该留给另一个真实故障:codex 从头到尾一声不吭(rc=2 且产出接近 0)。
+
+**已做(PR #1)**:熔断只对静默挂起触发;rc=3 永不熔断,改为提示调大上限。
+
+- [x] `codex_pk.sh` 加熔断读写(只对 silent stall)
+- [ ] **重新评估 `CODEX_MAX_SECS=360`** —— 有一次实测证据表明它对真实 PK 偏小。
+      在调大之前先收集几次 raw 产出大小与耗时,别又拿一个样本下结论。
+- [ ] R3 的标签要从 `codex_pk.sh` stdout 第一行(`CHALLENGER:`)**原样读出来**再写进
+      `--round-models`,而不是由执行者凭印象填。熔断让这件事更容易出错:R3 现在 2 秒返回、
+      transcript 里连 `codex attempt 1/1` 都没有,读起来像一轮正常的快速 round。
+
+> 教训和 5.1 是同一条:**下结论前先看那次运行自己留下的证据。** 5.1 是把答案喂进去验证,
+> 5.3 是根本没打开那个 99KB 的输出文件。两次都是「省掉一次核对」换来一个自信的错误判断。
 
 ### 5.4 巡检范围被我写了第二套源 —— 这正是 skill 明令禁止重建的东西
 
