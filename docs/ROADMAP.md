@@ -78,20 +78,42 @@ reviewer 手工实证发现,DeepSeek R1 两次都是 0 命中 + 假阳性。
 
 不是模型弱,是**喂进去的东西结构上不可能包含答案**。下面五条按性价比排序。
 
-### 5.1 增量复审要把「上一轮 review 正文」喂给 R1 🔴 最高性价比
+### 5.1 增量复审的漏改点 —— 喂 R1 试过了,不管用;该喂的是 Opus R2
 
 **问题**:增量复审的 blocking 几乎都是**漏改点** —— 上一轮提的 finding 只改了一半,
 剩下那半**不在这次的 diff 里**。只看 diff 的 R1,结构上就发现不了。
 CoLivingOS#75 两条 blocking(`TODO:68` 的总结句、`tasks.md:964/966` 的活规格)都是这一类。
 
-**方案**:`$pr` Step 2 之后、Step 3 之前插一步 —— 若 `last_reviewed_head_oid` 非空,
-用 `gh pr view N --json reviews` 取上一轮 review 正文,连同增量 diff 一起喂给 R1a,
-prompt 明确要求:**逐条核对上一轮每个 finding 是否已改干净,漏改点按原严重度报出**。
-R1b 不变。
+**已做(PR #3):** `scripts/fetch_prior_review.py` + `deepseek_review.py --prior-review FILE`,
+把上一轮 review 正文插在 diff **之前**,要求逐条判 FIXED/PARTIAL/NOT FIXED。
 
-- [ ] `scripts/fetch_prior_review.py`(取最近一条 clestons 的 review body)
-- [ ] `deepseek_review.py` 加 `--prior-review FILE`
-- [ ] SKILL.md Step 2 后插入这一步,并写明「增量复审时**必须**带」
+**⚠️ 实测结论:这个方案没有解决它想解决的问题。** 原来这条写着「🔴 最高性价比」,
+是我在**没有对照**的情况下写的 —— 第一次验证时我把自己刚写完的那条 review 喂了回去,
+它逐条复述了一遍,看起来很成功。那是循环论证。
+
+真做对照(只喂**上一轮**的 review,那一轮从没提过这两处):
+
+| 配置 | 找到 `TODO:68`? | 找到 `tasks.md:964/966`? |
+|---|:--:|:--:|
+| 增量 diff + 上一轮 review | ❌ | ❌ |
+| **`-U40` 加宽 diff**(两处都真的出现在喂进去的文本里,grep 验过)+ 上一轮 review | ❌ | ❌ |
+
+第二行才是关键:那两处**就在**它读到的文本里,它还是没找到,反而多了两条 "No issue" 的凑数行。
+所以瓶颈不是「看不到」,是 flash 在这类判断上不行。两轮实测 R1a 0/4、0/1,
+两次的 blocking 全部由 **Opus R2** 找到。
+
+**接下来该做的**(未做):把这套输入 —— 上一轮 review 正文 + `-U40` 加宽 diff ——
+喂给**实际找到东西的那一轮**,也就是 Opus R2,而不是继续加强 R1。
+
+- [x] `scripts/fetch_prior_review.py`
+- [x] `deepseek_review.py --prior-review FILE`
+- [ ] **R2 的 prompt 带上 prior review + 加宽 diff**(真正的杠杆)
+- [ ] 增量复审的 diff 默认 `-U40` 而非 `-U3`(漏改点通常紧挨着改对的那处)
+- [ ] SKILL.md Step 2 后插入取 prior review 这一步,写明增量复审必须带 ——
+      但别再宣称它能让 R1 抓到漏改点
+
+> 教训归教训,单独记一条:**验证一个「让模型发现 X」的改动时,不能把答案喂进去。**
+> 我第一次就是这么验的,并据此把它标成了最高性价比。
 
 ### 5.2 「回归测试不承重」应该做成机械检查,不该靠人肉
 
