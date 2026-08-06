@@ -65,3 +65,88 @@ verify 6.5%  r1ab 1.7%  prep 0.9%  post 0.2%
       (没测过的东西不许编)
 - [ ] `review_rounds` 已从存档回填 66 行(`scripts/backfill_review_rounds.py`)
 - [ ] round-profile 的「未计时部分」占比要盯着 —— 现在 16%,如果涨上去说明打点漏了阶段
+
+## 5. 增量复审这条路是瞎的(2026-08-06,待 jason review)
+
+来源:CoLivingOS#74 / #75 两次增量复审的自评。两次的 blocking **全部**由 Opus R2 或
+reviewer 手工实证发现,DeepSeek R1 两次都是 0 命中 + 假阳性。
+
+| PR | 轮数 | 耗时 | R1a | R1b | 本轮 blocking 谁找到的 |
+|---|---|---|---|---|---|
+| CoLivingOS#74 | 4 | 19 min | 0/2(全假阳性) | 0/2(全假阳性) | reviewer 手工换文件重跑 + Opus R2 独立撞上 |
+| CoLivingOS#75 | 3 | 9 min | 0/1(误报) | 0(正确判 clean) | Opus R2 扫 diff **之外**的漏改点 |
+
+不是模型弱,是**喂进去的东西结构上不可能包含答案**。下面五条按性价比排序。
+
+### 5.1 增量复审要把「上一轮 review 正文」喂给 R1 🔴 最高性价比
+
+**问题**:增量复审的 blocking 几乎都是**漏改点** —— 上一轮提的 finding 只改了一半,
+剩下那半**不在这次的 diff 里**。只看 diff 的 R1,结构上就发现不了。
+CoLivingOS#75 两条 blocking(`TODO:68` 的总结句、`tasks.md:964/966` 的活规格)都是这一类。
+
+**方案**:`$pr` Step 2 之后、Step 3 之前插一步 —— 若 `last_reviewed_head_oid` 非空,
+用 `gh pr view N --json reviews` 取上一轮 review 正文,连同增量 diff 一起喂给 R1a,
+prompt 明确要求:**逐条核对上一轮每个 finding 是否已改干净,漏改点按原严重度报出**。
+R1b 不变。
+
+- [ ] `scripts/fetch_prior_review.py`(取最近一条 clestons 的 review body)
+- [ ] `deepseek_review.py` 加 `--prior-review FILE`
+- [ ] SKILL.md Step 2 后插入这一步,并写明「增量复审时**必须**带」
+
+### 5.2 「回归测试不承重」应该做成机械检查,不该靠人肉
+
+**问题**:CoLivingOS#74 加了一条回归测试,**对着修复前的代码也是绿的** —— 它挡不住 bug
+回来。这是我手工把 `statements.ts` 换回父提交版本重跑才发现的。这个 bug 类**完全可机械化**,
+而且值钱:一条不会失败的回归测试比没有更糟,它让 diff 看起来已经把问题钉死了。
+
+**方案**:`scripts/verify_regression_test.py <repo> <pr>` —— PR 同时改了 src 和 test 时:
+1. 建临时 worktree 停在 PR head
+2. 把**本 PR 改过的 src 文件**逐个换回父提交版本
+3. 只跑**本 PR 新增/修改的那几个 test**
+4. 仍然全绿 → 报 `[Medium] 回归测试不承重` finding
+
+- [ ] 写脚本(先只支持 vitest/jest,按 `describe`/`it` 名字过滤)
+- [ ] 接进 `$pr` 的 4-round 路径,作为 R2 之前的机械证据
+- [ ] 跑一段时间统计命中率,决定要不要推广到 2-round
+
+### 5.3 Codex 挂起税:一次烧 6 分钟,占单次 review 的 1/3
+
+**问题**:CoLivingOS#74 的 R3,`codex exec` 挂起 366s 才回退到 DeepSeek,
+而整次 review 一共 1159s —— **31.6% 的时间花在等一个已经死了的进程**。
+`codex_pk.sh` 已经有 stall 检测,但每个 PR 都要重新付一次这个税。
+
+**方案**:短期熔断。`codex_pk.sh` 挂起回退时写 `.state/pr-daemon/codex-breaker.json`
+(时间戳 + 原因);下次调用先读它,若距上次挂起 < 30 min 直接跳过 codex 走 DeepSeek,
+并在输出第一行注明 `CHALLENGER: deepseek (codex breaker open, tripped <时间>)`。
+熔断过期后自动放行一次试探。
+
+- [ ] `codex_pk.sh` 加熔断读写
+- [ ] 标签照实写(不能因为熔断就说「Codex 已跑」)
+
+### 5.4 巡检范围被我写了第二套源 —— 这正是 skill 明令禁止重建的东西
+
+**问题**:本会话为了「只审 CoLivingOS」,我**手写 cron prompt 把仓库名写死在里面**,
+绕过了 `start_loop_scope.py`。SKILL.md「⛔ ONE list, ONE command」那节专门讲过范围
+曾经有三份互相打架的源、合并花了多大力气 —— 我又造了第四份,而且它只活在 cron prompt 里,
+`$pr list` 完全看不见。
+
+**方案**:范围收窄要走那**一条命令**,不许写进 prompt。
+`$pr start [Nm] [all] [--only <repo>[,<repo>]]`,`--only` 落到
+`start_loop_scope.py targets --only ...`,cron prompt 里永远只有那一行命令。
+`$pr list` 要能显示「当前巡检被 --only 收窄到 X」。
+
+- [ ] `start_loop_scope.py targets` 加 `--only`
+- [ ] `$pr start` 解析 `--only` 并透传;SKILL.md 记一句「范围绝不写进 cron prompt」
+
+### 5.5 idle 自停把「用户直接点名审的 PR」算成空转
+
+**问题**:本会话真审了 2 个 PR 并 post 了结论,但因为不是在 cron 周期**内**审的,
+`idle_rounds` 照样从 0 累到 3,1 小时后巡检自停了。计数器记的是「本周期 k」,
+而它想表达的是「最近有没有进展」。
+
+**方案**:idle 记账改成读**最近一次 post 的时间戳**(`model_review_runs.finished_at`
+的 max),而不是本周期的 k。距上次 post > 60 min 才算真空转。
+这和 #74 那个 lock 的 mtime 修法是同一个道理 —— 计数器要表示「距上次进展多久」。
+
+- [ ] `start` skill 的 Step D 改成时间戳判据
+- [ ] 顺带:`$pr start` 时把 `finished_at` 的 max 读出来当基线,别一上来就从 0 数
