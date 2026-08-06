@@ -86,24 +86,33 @@ def fake_resolve(token: str) -> str:
     return hit
 
 
-def fake_scope(targets=None, pins=None):
-    targets = ALL_TARGETS if targets is None else targets
+def fake_scope(targets=None, pins=None, limit=8):
+    """Mirror the real compute_scope, INCLUDING the top-N cap.
+
+    The first version of this stub set `scope.targets = ordered` and ignored `limit`, so no
+    assertion could ever exercise --only against the cap — which is exactly where the real bug
+    was (a named repo with pending PRs that lost the top-N recency race was dropped and then
+    reported as 无待审). A stub that cannot express the bug cannot catch it.
+    """
+    ordered = ALL_TARGETS if targets is None else list(targets)
     scope = types.SimpleNamespace()
-    scope.targets = list(targets)
     scope.pins = pins if pins is not None else ["jhfnetboy/CoLivingOS", "jhfnetboy/CMIC"]
-    scope.pinned_hits = [r for r in targets if r in (scope.pins or [])]
-    scope.default_hits = [r for r in targets if r not in (scope.pins or [])]
-    scope.ordered = list(targets)
+    scope.ordered = ordered
+    scope.pinned_hits = [r for r in ordered if r in scope.pins]
+    rest = [r for r in ordered if r not in scope.pins]
+    scope.default_hits = rest if limit <= 0 else rest[:limit]
+    scope.targets = scope.pinned_hits + scope.default_hits
     scope.prs = lambda repo: PENDING.get(repo, [])
     return scope
 
 
-def run(fn, *args, targets=None, **kw):
+def run(fn, *args, targets=None, pins=None, **kw):
     """Call a cmd_* function with stubs in place; return (stdout, stderr)."""
     out, err = io.StringIO(), io.StringIO()
     orig_resolve, orig_compute = sls.resolve, sls.compute_scope
     sls.resolve = fake_resolve
-    sls.compute_scope = lambda *a, **k: fake_scope(targets)
+    # `limit` reaches the stub the same way it reaches the real compute_scope: positionally.
+    sls.compute_scope = lambda lim, *a, **k: fake_scope(targets, pins, limit=lim)
     try:
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             fn(*args, **kw)
@@ -160,6 +169,29 @@ try:
     bad("empty --only silently fell through")
 except SystemExit as e:
     want_true("empty --only exits with a clear message", "empty" in str(e), str(e))
+
+# ── 7. THE BUG THIS PR SHIPPED FIRST: --only must not intersect with the top-N cap ──
+print("[7] a named repo outside the top-N window is still scanned")
+# 3 repos with pending PRs, limit=2, and the wanted one is LAST by recency and NOT pinned —
+# so it is absent from `targets` but present in `ordered`. Filtering `targets` drops it and
+# then lies about why, and the patrol self-stops while that repo has PRs waiting.
+stdout, stderr = run(sls.cmd_targets, 2, False, "kms", pins=[],
+                     targets=["jhfnetboy/CoLivingOS", "jhfnetboy/CMIC",
+                              "AAStarCommunity/Brood", "AAStarCommunity/AirAccount"])
+check("the out-of-window repo is still emitted",
+      [l for l in stdout.splitlines() if l.strip()], ["AAStarCommunity/AirAccount"])
+want_true("and is NOT falsely reported as 无待审", "无待审" not in stderr, stderr.strip())
+
+print("[8] the narrowed summary counts match the narrowed list")
+stdout, stderr = run(sls.cmd_targets, 8, False, "coliving,cmic")
+want_true("targets summary reflects --only, not the un-narrowed scope",
+          "2 selected by --only" in stderr, stderr.strip())
+stdout, _ = run(sls.cmd_list, 2, False, "kms", pins=[],
+                targets=["jhfnetboy/CoLivingOS", "jhfnetboy/CMIC",
+                         "AAStarCommunity/Brood", "AAStarCommunity/AirAccount"])
+want_true("list counts the narrowed repo as scanned", "本轮实扫 1 个仓库" in stdout, stdout)
+want_true("list drops the meaningless 「没进前 N」 clause under --only",
+          "没进前" not in stdout, stdout)
 
 print(f"\npassed: {PASS}   failed: {FAIL}")
 sys.exit(1 if FAIL else 0)
