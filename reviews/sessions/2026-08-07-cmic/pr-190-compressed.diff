@@ -1,0 +1,453 @@
+diff --git a/apps/api/migrations/0008-shares-page-html.sql b/apps/api/migrations/0008-shares-page-html.sql
+new file mode 100644
+index 0000000..2047832
+--- /dev/null
++++ b/apps/api/migrations/0008-shares-page-html.sql
+@@ -0,0 +1,2 @@
++-- 分享页快照（2026-08-07）。⚠️ ALTER 不幂等，重跑报 duplicate column。
++ALTER TABLE shares ADD COLUMN page_html TEXT;
+diff --git a/apps/api/schema.sql b/apps/api/schema.sql
+index 64c300a..f345750 100644
+--- a/apps/api/schema.sql
++++ b/apps/api/schema.sql
+@@ -483,3 +483,13 @@ CREATE TABLE IF NOT EXISTS shares (
+ );
+ CREATE INDEX IF NOT EXISTS idx_shares_owner ON shares(owner_user_id, created_at DESC);
+ CREATE INDEX IF NOT EXISTS idx_shares_expiry ON shares(expires_at);
++
++-- 分享页快照（2026-08-07 Jason 实测后重做）。
++-- 🔴 **不再要求「先有一张落盘的照片级图」**。上一版 createShare 强制
++--    `JOIN render_jobs ... AND j.delivered_at IS NOT NULL`，客户还没出过照片级图时
++--    查询返空 → 400，而前端只闪一下「Creating link…」就没动静了。
++--    客户原话：「这不就是把当前页面去掉报价那一部分直接生成个静态页面吗？」—— 他是对的。
++-- 🔴 和 conversations.thread_html 同级的 PII：里面有客户原话和 logoText。
++--    但**分享页本来就是给外人看的**，所以这一列不按 owner 剥离 ——
++--    真正的防线是「存进来之前就已经剥掉价格」（前端剥 + 服务端断言）。
++ALTER TABLE shares ADD COLUMN page_html TEXT;
+diff --git a/apps/api/src/index.ts b/apps/api/src/index.ts
+index c3de73a..8841ed1 100644
+--- a/apps/api/src/index.ts
++++ b/apps/api/src/index.ts
+@@ -26,7 +26,7 @@ import {
+ import { chatTurn, type ChatMsg, type ChatBrief } from './chat';
+ import {
+   createShare, readShare, readShareAsset, revokeShare, cleanupShares,
+-  SHARE_READ_PER_MIN, SHARE_ASSET_PER_MIN, SHARE_CREATE_PER_DAY, type ShareEnv,
++  SHARE_READ_PER_MIN, SHARE_ASSET_PER_MIN, SHARE_CREATE_PER_DAY, SHARE_PAGE_MAX, type ShareEnv,
+ } from './share';
+ import {
+   writeCostEvent, summarize, todayTotals, detail as ledgerDetail,
+@@ -1198,6 +1198,11 @@ async function route(
+         conversationId: id(b.conversation_id, 'conversation_id'),
+         cardKey: str(b.card_key, 'card_key', 80),
+         spec: b.spec,
++        // 确认页快照(价格已由前端剥掉)。超限就【不传这个字段】,不抛 ——
++        //    否则「快照太大」会让整个分享失败,而分享本来还能靠 design 字段降级。
++        //    (和 thread_html 同一条教训:守卫在下游、上游先炸 = 守卫等于不存在。)
++        pageHtml: typeof b.page_html === 'string' && b.page_html.length <= SHARE_PAGE_MAX
++          ? b.page_html : undefined,
+       }, Date.now());
+       if (!r.ok) throw new HttpError(400, r.error);
+       // 只回 token 和有效期。**不回完整 URL** —— 域名由前端拼,后端不该猜自己被挂在哪个域上。
+diff --git a/apps/api/src/share.test.ts b/apps/api/src/share.test.ts
+index c68aa39..d9acae9 100644
+--- a/apps/api/src/share.test.ts
++++ b/apps/api/src/share.test.ts
+@@ -467,6 +467,42 @@ async function main() {
+     ok('  什么都没落库', row.n === 0, `落了 ${row.n} 行`);
+   }
+ 
++  // ══ 页面快照:图变成可选(2026-08-07 Jason 实测后重做)════════════
++  {
++    const rP = seed(); const eP = mkEnv(rP);
++    const PAGE = '<section class="quote-left"><img alt="hero" src="x.png"><div class="views3d"></div></section>';
++
++    // 🔴 **没有任何落盘的图,也要能建链接。** 这是客户实测卡住的那条:
++    //    上一版强制 JOIN render_jobs AND delivered_at IS NOT NULL,查空就 400,
++    //    前端表现成「Creating link… 闪一下什么都没发生」。
++    rP.exec("DELETE FROM conversation_assets");
++    const noImg = await hit(eP, 'POST', '/shares',
++      { conversation_id: 'c1', card_key: 't1:a', spec: DIRTY_SPEC, page_html: PAGE }, SESS);
++    ok('🔴 没有图,只有页面快照 → 也能建链接', noImg.status === 200 && !!noImg.json?.token,
++      `status=${noImg.status} ${noImg.text.slice(0, 140)}`);
++
++    const tok = noImg.json?.token as string;
++    const got = await hit(eP, 'GET', `/share/${tok}`);
++    ok('  匿名读得回快照', got.status === 200 && typeof got.json?.pageHtml === 'string',
++      `status=${got.status}`);
++    ok('  快照原样(不是被拼出来的)', got.json?.pageHtml === PAGE, String(got.json?.pageHtml).slice(0, 80));
++    // 🔴 快照也不许带商务信息 —— 它和 design 走的是两条路,两条都要干净
++    for (const bad of ['$', 'USD', 'MOQ', 'unitPrice', '12.34']) {
++      ok(`  快照响应里没有「${bad}」`, !got.text.includes(bad), got.text.slice(0, 160));
++    }
++
++    // 什么都没有还是要拒 —— 否则那个链接打开是空白
++    const rQ = seed(); const eQ = mkEnv(rQ);
++    rQ.exec("DELETE FROM conversation_assets");
++    const nothing = await hit(eQ, 'POST', '/shares',
++      { conversation_id: 'c1', card_key: 't1:a', spec: DIRTY_SPEC }, SESS);
++    ok('  没图又没快照 → 仍然拒(别发一个打开是空白的链接)', nothing.status === 400, `status=${nothing.status}`);
++
++    // 没图时不受图的保留期夹逼,给满 30 天
++    const days = Math.round(((noImg.json?.expires_at ?? 0) - Date.now()) / 86_400_000);
++    ok('  纯快照给满 30 天(不被图的保留期夹)', days >= 29 && days <= 31, `给了 ${days} 天`);
++  }
++
+   // ── 白名单本身(单元层)──────────────────────────────────────
+   {
+     const picked = pickDesign(DIRTY_SPEC);
+diff --git a/apps/api/src/share.ts b/apps/api/src/share.ts
+index 87fd5ec..6f1fc8d 100644
+--- a/apps/api/src/share.ts
++++ b/apps/api/src/share.ts
+@@ -89,6 +89,8 @@ const DESIGN_KEYS = [
+  *    **名字骗了我自己**，Codex 实测抓到。
+  */
+ export const DESIGN_MAX_BYTES = 16 * 1024;
++/** 页面快照上限。比 design 大得多 —— 它是整段 DOM(含内联 3D 画布的 data URL 会被前端剥掉)。 */
++export const SHARE_PAGE_MAX = 512 * 1024;
+ const utf8Len = (s: string): number => new TextEncoder().encode(s).length;
+ /** 白名单挑出来的整棵树最多多少个节点。 */
+ const NODE_BUDGET = 600;
+@@ -179,7 +181,18 @@ export function newShareToken(): string {
+   return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+ }
+ 
+-export interface CreateShareInput { conversationId: string; cardKey: string; spec: unknown }
++export interface CreateShareInput {
++  conversationId: string; cardKey: string; spec: unknown;
++  /**
++   * 确认页当前 DOM 的快照，**价格部分已由前端剥掉**（2026-08-07 重做）。
++   *
++   * 🔴 上一版要求「先有一张落盘的照片级图」才让建链接 —— 客户还没出过图时直接 400，
++   *    而前端只闪一下「Creating link…」。客户原话：
++   *    「这不就是把当前页面去掉报价那一部分直接生成个静态页面吗？」——他是对的。
++   *    现在图是**可选增强**，不是前置条件。
++   */
++  pageHtml?: string;
++}
+ export type CreateShareResult = { ok: true; token: string; expiresAt: number } | { ok: false; error: string };
+ 
+ /**
+@@ -220,7 +233,13 @@ export async function createShare(
+     if (born === null) return { ok: false, error: 'this image has no usable timestamp' };
+     oldestJob = Math.min(oldestJob, born);
+   }
+-  if (!assets.length) return { ok: false, error: 'no shareable image for this card' };
++  // 🔴 **没有图也能分享。** 图是增强,不是前置条件 —— 见 CreateShareInput.pageHtml 的注释。
++  //    这一行【曾经是】`if (!assets.length) return 400` —— 客户还没出过照片级图时,
++  //    分享按钮就永远失败(而且失败提示被 finally 盖掉,表现成「Creating link… 卡住」)。
++  //    但「什么都没有」还是要拒:没图又没页面快照,那个链接打开是空白。
++  if (!assets.length && !input.pageHtml) {
++    return { ok: false, error: 'nothing to share yet — open the quote page first' };
++  }
+ 
+   const design = pickDesign(input.spec);
+   assertNoCommercial(design, 'design');            // 入库前就剥干净（dump 里也不该有价）
+@@ -234,17 +253,22 @@ export async function createShare(
+   const rawExpiry = now + SHARE_TTL_DAYS * 86_400_000;
+   // 🔴 **不许比图活得久。** render_jobs 的保留期也是 30 天,分享一张 25 天前的图 →
+   //    链接还有 5 天有效、而图已经 404,readShare 却仍返 200 且 views 非空。
+-  const imageDeath = oldestJob + RENDER_RETENTION_DAYS * 86_400_000;
++  // 有图才受图的保留期夹逼；纯页面快照不依赖 R2，给满 30 天。
++  const imageDeath = assets.length ? oldestJob + RENDER_RETENTION_DAYS * 86_400_000 : Infinity;
+   const expiresAt = Math.ceil(Math.min(rawExpiry, imageDeath) / 86_400_000) * 86_400_000;
+   if (expiresAt <= now) return { ok: false, error: 'the image behind this card has already expired' };
+   await env.DB.prepare(
+-    'INSERT INTO shares (token, owner_user_id, design_json, assets_json, created_at, expires_at) ' +
+-    'VALUES (?1,?2,?3,?4,?5,?6)',
+-  ).bind(token, me.id, designJson, JSON.stringify(assets), now, expiresAt).run();
++    'INSERT INTO shares (token, owner_user_id, design_json, assets_json, page_html, created_at, expires_at) ' +
++    'VALUES (?1,?2,?3,?4,?5,?6,?7)',
++  ).bind(token, me.id, designJson, JSON.stringify(assets), input.pageHtml ?? null, now, expiresAt).run();
+   return { ok: true, token, expiresAt };
+ }
+ 
+-export interface SharePayload { design: Record<string, unknown>; views: string[]; expiresAt: number }
++export interface SharePayload {
++  design: Record<string, unknown>; views: string[]; expiresAt: number;
++  /** 确认页快照（已剥价）。有它就直接渲染，没有才退回按 design 字段拼。 */
++  pageHtml?: string;
++}
+ 
+ /**
+  * 匿名读。撤销 / 过期 / 不存在 —— **一律 null（调用方转 404）**，不区分。
+@@ -252,9 +276,9 @@ export interface SharePayload { design: Record<string, unknown>; views: string[]
+ export async function readShare(env: ShareEnv, token: string, now: number): Promise<SharePayload | null> {
+   if (!token || token.length < SHARE_TOKEN_MIN) return null;
+   const row = await env.DB.prepare(
+-    'SELECT design_json, assets_json, expires_at FROM shares ' +
++    'SELECT design_json, assets_json, page_html, expires_at FROM shares ' +
+     ' WHERE token=?1 AND revoked_at IS NULL AND expires_at > ?2',
+-  ).bind(token, now).first<{ design_json: string; assets_json: string; expires_at: number }>();
++  ).bind(token, now).first<{ design_json: string; assets_json: string; page_html: string | null; expires_at: number }>();
+   if (!row) return null;
+ 
+   let design: Record<string, unknown> = {};
+@@ -263,7 +287,10 @@ export async function readShare(env: ShareEnv, token: string, now: number): Prom
+   try { assets = JSON.parse(row.assets_json) as { view: string; key: string }[]; } catch { assets = []; }
+ 
+   // 只出 view 名，**不出 R2 key** —— key 是内部寻址，泄漏它等于泄漏存储布局
+-  const payload: SharePayload = { design, views: assets.map((a) => a.view), expiresAt: row.expires_at };
++  const payload: SharePayload = {
++    design, views: assets.map((a) => a.view), expiresAt: row.expires_at,
++    ...(row.page_html ? { pageHtml: row.page_html } : {}),
++  };
+   assertNoCommercial(payload.design, 'design');    // 纵深：老快照可能是旧版白名单写进去的
+   return payload;
+ }
+diff --git a/apps/web/share.html b/apps/web/share.html
+index cba1daa..3bdfd7a 100644
+--- a/apps/web/share.html
++++ b/apps/web/share.html
+@@ -45,6 +45,20 @@
+     .gone h1 { margin: 0 0 var(--space-sm); }
+     .gone p { color: var(--shade-50); margin: 0; }
+ 
++    /* 快照渲染 —— Jason 2026-08-07：「图片还有 3D 的要居中」。
++       确认页是左右两栏（左图右价），剥掉价格那栏之后左栏会孤零零贴在左边。
++       这里给它一个居中的窄栏容器，看起来才像一页专门给人看的东西。 */
++    .sh-snapshot { max-inline-size: 900px; margin-inline: auto; }
++    .sh-snapshot img, .sh-snapshot canvas { display: block; margin-inline: auto; max-inline-size: 100%; height: auto; }
++    .sh-snapshot .views3d { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--space-sm);
++                            margin-block-start: var(--space-md); }
++    .sh-snapshot .views3d .v3d { aspect-ratio: 1/1; border: 1px solid var(--hairline-light);
++                                 border-radius: var(--radius-lg); overflow: hidden; position: relative;
++                                 background: radial-gradient(120% 95% at 50% 18%, #9a9488, #625d54); }
++    .sh-snapshot .views3d .v3d img { inline-size: 100%; block-size: 100%; object-fit: cover; }
++    .sh-snapshot .viewer { display: grid; place-items: center; }
++    @media (max-width: 640px) { .sh-snapshot .views3d { grid-template-columns: repeat(2, 1fr); } }
++
+     .foot { padding: 0 clamp(20px,5vw,56px) var(--space-xl); color: var(--shade-50); font-size: var(--micro-size); }
+   </style>
+ </head>
+diff --git a/apps/web/src/customer.ts b/apps/web/src/customer.ts
+index 4f8d073..38ec742 100644
+--- a/apps/web/src/customer.ts
++++ b/apps/web/src/customer.ts
+@@ -1533,7 +1533,7 @@ function paint() {
+     lidbase: 'Rigid top & bottom box',
+     magnet: 'Rigid magnetic book box',
+     drawer: 'Rigid drawer (sleeve + tray)',
+-    mailer: 'Corrugated mailer (one-piece)',
++    mailer: 'Mailer box (one-piece corrugated)',
+   };
+   $('s-struct').textContent = STRUCT[state.type] ?? 'Rigid box';
+   $('s-outer').textContent = `${o.l.toFixed(0)} × ${o.w.toFixed(0)} × ${o.h.toFixed(0)} mm`;
+diff --git a/apps/web/src/funnel.ts b/apps/web/src/funnel.ts
+index fe0e958..ad23e55 100644
+--- a/apps/web/src/funnel.ts
++++ b/apps/web/src/funnel.ts
+@@ -38,7 +38,7 @@ export const BOX_TYPES: Array<{ type: BoxType; name: string; desc: string }> = [
+   { type: 'lidbase', name: 'Lift-off lid',      desc: 'Rigid top & bottom box' },
+   { type: 'magnet',  name: 'Magnetic book',     desc: 'Hinged linen-wrapped case' },
+   { type: 'drawer',  name: 'Drawer box',        desc: 'Slide-out shoulder box' },
+-  { type: 'mailer',  name: 'Corrugated mailer', desc: 'Kraft shipper, flat-pack' },
++  { type: 'mailer',  name: 'Mailer box',        desc: 'Kraft shipper, flat-pack' },
+ ];
+ 
+ /**
+diff --git a/apps/web/src/sample.ts b/apps/web/src/sample.ts
+index 3401f73..73f5cbd 100644
+--- a/apps/web/src/sample.ts
++++ b/apps/web/src/sample.ts
+@@ -414,38 +414,110 @@ $('approve').onclick = () => { location.href = '/approve.html'; };
+  * ⚠️ modal 只是**入口**，内容全在独立页 —— **不在 modal 里预览规格**，
+  *    那会变成第二份要维护的排版。
+  */
+-$('talk').onclick = async () => {
+-  const btn = $('talk') as HTMLButtonElement;
+-  const done = (msg: string) => { const old = btn.textContent; btn.textContent = msg; setTimeout(() => { btn.textContent = old; }, 2400); };
++/**
++ * 🔴 **进页面就把分享链接建好，点按钮时直接给。**
++ *
++ * 上一版是点了才建：客户盯着「Creating link…」等一次网络往返 + 一次 D1 写，
++ * 而且失败时提示被 finally 盖掉，表现成「卡住」。
++ * Jason 2026-08-07 原话：「而不是他妈的现场给我生成，这得等多久啊」——他是对的。
++ *
++ * 同一份内容存两份（带价的在本页、不带价的在 shares 表）没有问题：
++ * 快照本来就是**不可变的**，分享出去的就该是当时那一版。
++ */
++let sharePromise: Promise<{ token: string; expiresAt?: number } | null> | null = null;
+ 
++async function createShareLink(): Promise<{ token: string; expiresAt?: number } | null> {
++  if (!API) return null;
+   let ref: { conversationId?: string; cardKey?: string } | null = null;
+   try { ref = JSON.parse(sessionStorage.getItem('cmic.shareRef') ?? 'null'); } catch { ref = null; }
+-  if (!API || !ref?.conversationId || !ref.cardKey) {
+-    // 没有可分享的图(直接进的这一页 / 离线模式)。说人话,别说 "missing shareRef"。
+-    done('Nothing to share yet');
+-    return;
+-  }
+-
+-  btn.disabled = true;
+-  const old = btn.textContent;
+-  btn.textContent = 'Creating link…';
++  const pageHtml = buildSharePage();
++  if (!pageHtml && !ref?.cardKey) return null;      // 什么都没有,别浪费一次配额
+   try {
+     const res = await fetch(`${API}/shares`, {
+       method: 'POST', credentials: 'include',
+       headers: { 'content-type': 'application/json' },
+-      body: JSON.stringify({ conversation_id: ref.conversationId, card_key: ref.cardKey, spec: sel }),
++      body: JSON.stringify({
++        conversation_id: ref?.conversationId ?? '', card_key: ref?.cardKey ?? '',
++        spec: sel, page_html: pageHtml,
++      }),
+     });
+-    const d = await res.json() as { ok?: boolean; token?: string; expires_at?: number; error?: string };
++    const d = await res.json() as { token?: string; expires_at?: number; error?: string };
+     if (!res.ok || !d.token) throw new Error(d.error ?? 'could not create the link');
+-    openShareModal(`${location.origin}/share.html?t=${d.token}`, d.expires_at, d.token);
+-  } catch (err) {
+-    console.error(err);
+-    done('Could not create the link');
+-  } finally {
+-    btn.disabled = false; btn.textContent = old;
+-  }
++    return { token: d.token, expiresAt: d.expires_at };
++  } catch (err) { console.error('[share] 预生成失败', err); return null; }
++}
++
++// 页面稳定后静默预生成 —— 等 3D 画完，否则快照里的 canvas 是空的。
++setTimeout(() => { sharePromise = createShareLink(); }, 1200);
++
++$('talk').onclick = async () => {
++  const btn = $('talk') as HTMLButtonElement;
++  const done = (msg: string) => { const o2 = btn.textContent; btn.textContent = msg; setTimeout(() => { btn.textContent = o2; }, 2400); };
++  if (!API) { done('Offline — cannot share'); return; }
++
++  // 预生成好了就直接弹 —— 零等待,这才是点击该有的手感。
++  const ready = sharePromise ? await sharePromise : null;
++  if (ready) { openShareModal(`${location.origin}/share.html?t=${ready.token}`, ready.expiresAt, ready.token); return; }
++
++  // 没赶上预生成(刚进页面就点 / 预生成失败)→ 现建一次,并把结果缓存起来
++  const old = btn.textContent;
++  btn.disabled = true; btn.textContent = 'Creating link…';
++  sharePromise = createShareLink();
++  const r = await sharePromise;
++  btn.disabled = false; btn.textContent = old;
++  if (r) openShareModal(`${location.origin}/share.html?t=${r.token}`, r.expiresAt, r.token);
++  else { sharePromise = null; done('Could not create the link'); }
+ };
+ 
++/**
++ * 把确认页当前 DOM 抠成一份**去掉价格**的静态快照。
++ *
++ * ## 为什么是「只留白名单」而不是「删掉黑名单」
++ *
++ * 漏保留一个区块 = 分享页少块内容，客户看得出来。
++ * 漏删一个区块 = **价格外流**，而链接会被写进邮件、转进群，没人会发现。
++ * 代价不对称，所以**默认丢弃**：只有显式列出来的才留。
++ *
++ * ## 剥掉什么
++ *
++ * 整块 `.order`（总价 / 明细 / 三个按钮）和 `.qty`（阶梯报价表）——
++ * 它们是右栏的全部内容，所以直接不要 `.quote-right`。
++ * 左栏 `.quote-left`（大图 + 3D 视图 + 规格）原样留下。
++ *
++ * ⚠️ 3D 画布（`<canvas>`）截不进静态 HTML —— 换成它当下那一帧的位图。
++ */
++function buildSharePage(): string | undefined {
++  const left = document.querySelector('.quote-left');
++  if (!left) return undefined;
++  const clone = left.cloneNode(true) as HTMLElement;
++
++  // canvas 在静态页里是空白 —— 换成当前帧的位图
++  const liveCanvases = left.querySelectorAll('canvas');
++  const cloneCanvases = clone.querySelectorAll('canvas');
++  cloneCanvases.forEach((c, i) => {
++    const live = liveCanvases[i];
++    let url = '';
++    try { url = live ? live.toDataURL('image/png') : ''; } catch { url = ''; }
++    if (url) {
++      const im = document.createElement('img');
++      im.src = url; im.alt = '3D preview'; im.style.cssText = 'width:100%;height:auto;display:block';
++      c.replaceWith(im);
++    } else { c.remove(); }
++  });
++
++  // 交互控件在静态页里点了没反应 —— 去掉，别给假的可点感
++  for (const el of clone.querySelectorAll('button, input, select, textarea, script')) el.remove();
++
++  const html = clone.innerHTML;
++  // 🔴 最后一道:整段 grep 一遍货币符号。剥价靠的是结构，这条是反向对照 ——
++  //    它红了说明我漏了一个区块，而不是「幸好有它」。
++  if (/[$￥]|\bUSD\b|\bRMB\b|\bCNY\b/.test(html)) {
++    console.error('[share] 快照里还有货币符号，不发送 —— 说明剥价漏了区块');
++    return undefined;
++  }
++  return html.length > 512 * 1024 ? undefined : html;
++}
++
+ /** 我们自己的复制框。**不弹系统分享面板** —— 那个给不出「不含价」这句话。 */
+ function openShareModal(url: string, expiresAt: number | undefined, token: string): void {
+   document.getElementById('share-modal')?.remove();
+diff --git a/apps/web/src/share.ts b/apps/web/src/share.ts
+index d7c35a1..950ba74 100644
+--- a/apps/web/src/share.ts
++++ b/apps/web/src/share.ts
+@@ -57,7 +57,7 @@ async function main(): Promise<void> {
+   // 长度先在本地筛一道 —— 明显不是 token 的东西不值得打一次网络。
+   if (!API || token.length < 22 || !/^[A-Za-z0-9_-]+$/.test(token)) { showGone(); return; }
+ 
+-  let data: { design?: Record<string, unknown>; views?: string[]; expiresAt?: number };
++  let data: { design?: Record<string, unknown>; views?: string[]; expiresAt?: number; pageHtml?: string };
+   try {
+     const res = await fetch(`${API}/share/${encodeURIComponent(token)}`);
+     // 🔴 撤销 / 过期 / 不存在，服务端一律 404 —— 这里也一视同仁，
+@@ -66,6 +66,32 @@ async function main(): Promise<void> {
+     data = await res.json() as typeof data;
+   } catch { showGone(); return; }
+ 
++  /**
++   * 🔴 **有页面快照就直接渲染它** —— 那是分享者当时真正看到的那一页（价格已剥）。
++   *
++   * 上一版只按 `design` 的字段重新拼一遍规格表：客户看到的和分享者看到的是**两个页面**，
++   * 而且必须先有一张落盘的照片级图才建得出链接（没有就 400，前端表现成「Creating link… 卡住」）。
++   * 客户原话：「这不就是把当前页面去掉报价那一部分直接生成个静态页面吗？」
++   *
++   * 按 `design` 拼的那条路留着当兜底 —— 老链接没有快照。
++   */
++  if (typeof data.pageHtml === 'string' && data.pageHtml) {
++    const host = document.createElement('div');
++    host.className = 'sh-snapshot';
++    host.innerHTML = data.pageHtml;
++    $('sh-hero').replaceWith(host);
++    $('sh-views').remove();
++    $('sh-specs').closest('section')?.remove();
++    if (data.expiresAt) {
++      const d = Math.max(0, Math.round((data.expiresAt - Date.now()) / 86_400_000));
++      $('sh-foot').textContent = d > 0 ? `This link stops working in ${d} day${d === 1 ? '' : 's'}.` : 'This link stops working today.';
++    }
++    const title0 = typeof (data.design ?? {}).typeName === 'string' ? String((data.design ?? {}).typeName) : '';
++    if (title0) $('sh-title').textContent = title0;
++    ($('app') as HTMLElement).hidden = false;
++    return;
++  }
++
+   const design = data.design ?? {};
+   const views = Array.isArray(data.views) ? data.views : [];
+ 
+diff --git a/apps/web/src/texture.ts b/apps/web/src/texture.ts
+index 498b1a9..9a77621 100644
+--- a/apps/web/src/texture.ts
++++ b/apps/web/src/texture.ts
+@@ -873,11 +873,11 @@ export function defaultLogo(): Promise<HTMLImageElement> {
+   g.clearRect(0, 0, c.width, c.height);
+   g.fillStyle = '#000';
+   g.textAlign = 'center';
+-  g.font = '600 150px "Times New Roman", Georgia, serif';
+-  g.fillText('ABC', c.width / 2, 165);
+-  g.font = '400 62px "Times New Roman", Georgia, serif';
+-  g.letterSpacing = '14px';
+-  g.fillText('C O M P A N Y', c.width / 2, 258);
++  // Jason 2026-08-07 指定：示例品牌名用 `A Company`（原本是 ABC / C O M P A N Y 两行）。
++  // ⚠️ 这是**客户没给品牌名时**的占位。它不是「你的品牌文本」那种中文占位符 ——
++  //    那六个字只活在 apps/api 的黑名单里（模型吐出来就丢弃），客户从来看不到。
++  g.font = '600 132px "Times New Roman", Georgia, serif';
++  g.fillText('A Company', c.width / 2, 210);
+ 
+   const img = new Image();
+   img.src = c.toDataURL();
+

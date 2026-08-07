@@ -1,0 +1,262 @@
+diff --git a/apps/api/src/share.ts b/apps/api/src/share.ts
+index 121ddf9..ff610b4 100644
+--- a/apps/api/src/share.ts
++++ b/apps/api/src/share.ts
+@@ -324,8 +324,18 @@ export async function createShare(
+   //    静默降级会让它一直没人发现。
+   const dirty = commercialTextIn(blocks);
+   if (dirty) return { ok: false, error: `snapshot contains pricing (${dirty})` };
+-  const blocksJson = blocks.length ? JSON.stringify(blocks) : null;
+-  // 超限**丢掉快照、不抛** —— 分享还能靠 design 字段降级;上游抛了守卫就等于不存在。
++  // 总量超限时**从尾部逐块丢到装得下**,而不是整份丢。
++  // ⚠️ 单图上限是 260KB、最多 8 块,所以 hero 260KB + 4×120KB = 740KB 就会超 —— 不是极端情况。
++  //    整份丢的后果是分享页一张图都没有,而客户端只逐张校验、看不出来发生了什么(评审 Low)。
++  //    从尾部丢:hero 和第一张 3D 最重要,缩略图丢得起。
++  let kept = blocks;
++  let blocksJson = kept.length ? JSON.stringify(kept) : null;
++  while (blocksJson !== null && utf8Len(blocksJson) > SHARE_PAGE_MAX && kept.length > 1) {
++    kept = kept.slice(0, -1);
++    blocksJson = JSON.stringify(kept);
++  }
++  // 还是装不下(单块就超)→ 丢掉快照、**不抛**:分享还能靠 design 字段降级;
++  // 上游抛了守卫就等于不存在(和 thread_html 同一条教训)。
+   const blocksOk = blocksJson !== null && utf8Len(blocksJson) <= SHARE_PAGE_MAX ? blocksJson : null;
+ 
+   // 🔴 **没有图也能分享。** 图是增强,不是前置条件 —— 见 CreateShareInput.blocks 的注释。
+diff --git a/apps/web/share.html b/apps/web/share.html
+index 096cb59..c579827 100644
+--- a/apps/web/share.html
++++ b/apps/web/share.html
+@@ -76,6 +76,10 @@
+       .sh-shot figure:not(:first-child) { inline-size: calc(50% - var(--space-sm)); }
+     }
+ 
++    /* 色块 —— 规格表里的颜色行不写 hex,画出来给人看。 */
++    .sh-swatch { display: inline-block; inline-size: 2.4em; block-size: 1.1em; vertical-align: -2px;
++                 border: 1px solid var(--hairline-light); border-radius: 4px; }
++
+     .foot { padding: 0 clamp(20px,5vw,56px) var(--space-xl); color: var(--shade-50); font-size: var(--micro-size); }
+   </style>
+ </head>
+diff --git a/apps/web/src/chat.ts b/apps/web/src/chat.ts
+index 5e15369..0ff8254 100644
+--- a/apps/web/src/chat.ts
++++ b/apps/web/src/chat.ts
+@@ -1979,7 +1979,9 @@ function newChat() {
+   // ⚠️ `cmic.inquiryId` 也必须清 —— 漏了它,「＋ New」之后确认的第二张单会用同一个 id,
+   //    走 ON CONFLICT DO UPDATE **就地覆盖第一张**:at 不变、没有历史行、后台只剩后一张,
+   //    销售收到两封同单号、规格互相矛盾的邮件。**这正是这个 Task 要杀的 bug 类在上一层重现。**
+-  try { for (const k of ['cmic.selection', 'cmic.sampleImg', 'cmic.sampleMeta', 'cmic.brief', 'cmic.logoText', 'cmic.inquiryId']) sessionStorage.removeItem(k); } catch { /* ignore */ }
++  // ⚠️ `cmic.shareToken` / `cmic.shareRef` 也必须清 —— 漏了它们,「＋ New」开的全新方案
++  //    会把**上一个对话建的那条分享链接**递给老板(评审 2026-08-07 F1-(b))。
++  try { for (const k of ['cmic.selection', 'cmic.sampleImg', 'cmic.sampleMeta', 'cmic.brief', 'cmic.logoText', 'cmic.inquiryId', 'cmic.shareToken', 'cmic.shareRef']) sessionStorage.removeItem(k); } catch { /* ignore */ }
+   // ⚠️ **只删【这份存档】引用的图,不 clear 整库** —— 对象仓库是 origin 全局的,
+   //    而存档按用户分键。清库会销毁同一浏览器上其他账号的图本体(见 dropImages 注释)。
+   // ⚠️ 这里【不】await —— `newChat` 是**删**图,不是写。删到一半被打断只会留下几行孤儿,
+diff --git a/apps/web/src/sample.ts b/apps/web/src/sample.ts
+index d11feb1..08811c4 100644
+--- a/apps/web/src/sample.ts
++++ b/apps/web/src/sample.ts
+@@ -457,7 +457,12 @@ async function createShareLink(): Promise<{ token: string; expiresAt?: number }
+     });
+     const d = await res.json() as { token?: string; expires_at?: number; error?: string };
+     if (!res.ok || !d.token) throw new Error(d.error ?? 'could not create the link');
+-    try { sessionStorage.setItem('cmic.shareToken', JSON.stringify({ token: d.token, expiresAt: d.expires_at })); } catch { /* ignore */ }
++    // 🔴 **连 ref 一起存。** 只存 token 的话,回对话改了颜色再回来,
++    //    这个缓存会把【旧设计】的链接递给老板 —— #173「客户选了白,拿回来两张不是白的」
++    //    换到分享这条路上原样重演(评审 F1-(a))。
++    try { sessionStorage.setItem('cmic.shareToken', JSON.stringify({
++      token: d.token, expiresAt: d.expires_at, cid: ref.conversationId, cardKey: ref.cardKey,
++    })); } catch { /* ignore */ }
+     return { token: d.token, expiresAt: d.expires_at };
+   } catch (err) { console.error('[share] 预生成失败', err); return null; }
+ }
+@@ -472,8 +477,17 @@ async function createShareLink(): Promise<{ token: string; expiresAt?: number }
+  * ⚠️ 刷新复用已建好的 token，**不重建** —— 否则每次 F5 白扣一个名额。
+  */
+ try {
+-  const cached = JSON.parse(sessionStorage.getItem('cmic.shareToken') ?? 'null') as { token?: string; expiresAt?: number } | null;
+-  if (cached?.token) sharePromise = Promise.resolve({ token: cached.token, expiresAt: cached.expiresAt });
++  const cached = JSON.parse(sessionStorage.getItem('cmic.shareToken') ?? 'null') as
++    { token?: string; expiresAt?: number; cid?: string; cardKey?: string } | null;
++  const now = shareRef();
++  // 🔴 **只有和当前这一版设计对得上才复用。** 这一句是上一版没有的,而少了它
++  //    不是竞态、是【确定性地发旧 token】:模块求值时就读缓存,早于 shareRef() 被查,
++  //    于是 goToQuote() 刚写好的新 cardKey(颜色和变体就在 key 里)被完全忽略。
++  if (cached?.token && now && cached.cid === now.conversationId && cached.cardKey === now.cardKey) {
++    sharePromise = Promise.resolve({ token: cached.token, expiresAt: cached.expiresAt });
++  } else if (cached) {
++    try { sessionStorage.removeItem('cmic.shareToken'); } catch { /* ignore */ }
++  }
+ } catch { /* ignore */ }
+ setTimeout(() => { if (!sharePromise) sharePromise = createShareLink(); }, 1200);
+ 
+@@ -549,7 +563,12 @@ function shrink(dataUrl: string, maxW: number, quality: number): Promise<string
+       if (!g) { res(null); return; }
+       g.fillStyle = '#ffffff'; g.fillRect(0, 0, cv.width, cv.height);
+       g.drawImage(im, 0, 0, cv.width, cv.height);
+-      const out = cv.toDataURL('image/jpeg', quality);
++      // 超限【降质重试】,而不是静默丢掉这一张 —— 丢了客户看不出来少了什么(评审 Low)。
++      let out = cv.toDataURL('image/jpeg', quality);
++      for (const q of [0.7, 0.55]) {
++        if (out.length <= BLOCK_SRC_MAX) break;
++        out = cv.toDataURL('image/jpeg', q);
++      }
+       res(out.length <= BLOCK_SRC_MAX ? out : null);
+     };
+     im.onerror = () => res(null);
+@@ -558,6 +577,16 @@ function shrink(dataUrl: string, maxW: number, quality: number): Promise<string
+ }
+ 
+ async function buildShareBlocks(): Promise<ShareBlock[]> {
++  // 🔴 **等最新一次视图渲完再读 `lastViewUrls`。** 裸读会拿到空数组:
++  //    `renderViews3d()` 要 await logo + PMREM + 4× buildBoxGroup + 4× WebGL 渲染
++  //    + 4× 880² toDataURL,冷加载超过 1200ms 的定时器,快照就只有 hero 甚至全空。
++  //    ⚠️ 只 await 一次会绑在旧 Promise 上(换色/换 logo 会换掉 currentViewsReady)——
++  //    循环等到它不再变。**这段正确写法就在同文件 230 行之前的 PDF 那条路上**,
++  //    上一版只搬了尺寸那半、没搬时序那半(评审 F3)。
++  let ready = currentViewsReady;
++  await ready;
++  while (ready !== currentViewsReady) { ready = currentViewsReady; await ready; }
++  const views = [...lastViewUrls];   // 出循环后同步快照,中间无 await
+   const blocks: ShareBlock[] = [];
+   let hero = '';
+   try { hero = sessionStorage.getItem('cmic.sampleImg') ?? ''; } catch { hero = ''; }
+@@ -567,8 +596,8 @@ async function buildShareBlocks(): Promise<ShareBlock[]> {
+   }
+   // 4 张 3D 视图 —— 和报价单 PDF 同源(`lastViewUrls`),不重渲染。
+   const caps = ['Opened', 'Top', 'Side', 'Detail'];
+-  for (let i = 0; i < lastViewUrls.length && i < 4; i++) {
+-    const small = await shrink(lastViewUrls[i]!, 560, 0.8);
++  for (let i = 0; i < views.length && i < 4; i++) {
++    const small = await shrink(views[i]!, 560, 0.8);
+     if (small) blocks.push({ t: 'image', src: small, alt: `3D view — ${caps[i] ?? ''}`.trim(), cap: caps[i] });
+   }
+   return blocks;
+@@ -617,6 +646,11 @@ function openShareModal(url: string, expiresAt: number | undefined, token: strin
+       if (!r.ok) throw new Error('revoke failed');
+       p.textContent = 'This link has been turned off. Anyone who opens it now sees nothing.';
+       inp.disabled = true; copy.disabled = true; revoke.remove();
++      // 🔴 **撤销之后必须把本地状态一起清掉。** 否则再点一次 Share,弹窗会把
++      //    【这个已经死掉的 token】递出去,还配着「Anyone with this link can see…」——
++      //    应用主动断言一个死链接是活的,对方打开是 404(评审 F1-(c),一次误点就够)。
++      sharePromise = null;
++      try { sessionStorage.removeItem('cmic.shareToken'); } catch { /* ignore */ }
+     } catch { revoke.disabled = false; revoke.textContent = 'Could not turn it off'; }
+   };
+   const close = document.createElement('button');
+diff --git a/apps/web/src/share.ts b/apps/web/src/share.ts
+index efdd6ae..e26110a 100644
+--- a/apps/web/src/share.ts
++++ b/apps/web/src/share.ts
+@@ -14,14 +14,21 @@
+  * `?t=<token>`。**永远不要把它写进 DOM** —— 分享页会被截图、会被投屏，
+  * 而截图里的 token 就是一把可以再传播一次的钥匙。
+  */
++import { paperLabel, laminationLabel, finishLabel } from './labels.js';
++
+ const API = (import.meta.env.VITE_API_URL ?? '').replace(/\/+$/, '');
+ 
+ const $ = (id: string) => document.getElementById(id)!;
+ 
+-/** 设计字段 → 给人看的标签。**这张表就是这个页面会显示的全部东西**。 */
++/**
++ * 设计字段 → 给人看的标签。**这张表就是这个页面会显示的全部东西**。
++ *
++ * ⚠️ `boxType` **故意不在表里**。它是内部标识符(`lidbase` / `magnet`),
++ *    而 `typeName`(「Lift off lid」)已经把同一件事说成了人话 ——
++ *    在一个发给客户老板的页面上写「Construction: lidbase」只会让人以为我们不专业。
++ */
+ const LABELS: Array<[string, string]> = [
+   ['typeName', 'Box style'],
+-  ['boxType', 'Construction'],
+   ['variationName', 'Direction'],
+   ['dims', 'Size'],
+   ['paper', 'Board'],
+@@ -35,6 +42,9 @@ const LABELS: Array<[string, string]> = [
+   ['product', 'For'],
+ ];
+ 
++/** 十六进制色值 —— 给人看的页面上不该出现 `#b08247` 这种东西,渲成色块。 */
++const HEX = /^#[0-9a-f]{3,8}$/i;
++
+ function fmt(k: string, v: unknown): string | null {
+   if (v === null || v === undefined || v === '') return null;
+   if (k === 'dims' && typeof v === 'object') {
+@@ -42,7 +52,16 @@ function fmt(k: string, v: unknown): string | null {
+     if (!d.l || !d.w || !d.h) return null;
+     return `${d.l} × ${d.w} × ${d.h} mm`;
+   }
+-  if (typeof v === 'string') return v.replace(/[-_]/g, ' ');
++  // 🔴 **价格表的主键本来就是中文**(`157g双铜` / `哑胶`)——那是数据主键,不是文案。
++  //    `labels.ts` 的文件头写着这个 bug 的历史:「一张表散在两个文件里、第三个文件没有」。
++  //    分享页就是那第四个文件,而且是**所有客户面里最外面的一层**(匿名、会被转进邮件和群)。
++  //    2026-08-07 review 环境实测截图上确实是「Board: 157g双铜 / Lamination: 哑胶」。
++  if (typeof v === 'string') {
++    if (k === 'paper') return paperLabel(v);
++    if (k === 'lamination') return laminationLabel(v);
++    if (k === 'finish') return finishLabel(v);
++    return v.replace(/[-_]/g, ' ');
++  }
+   if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+   return null;
+ }
+@@ -83,7 +102,17 @@ async function main(): Promise<void> {
+     if (!text) continue;
+     seen.add(label);
+     const dt = document.createElement('dt'); dt.textContent = label;
+-    const dd = document.createElement('dd'); dd.textContent = text;   // textContent，不是 innerHTML
++    const dd = document.createElement('dd');
++    if (HEX.test(text)) {
++      // 色块 + 不写 hex —— 收件人要看的是「什么颜色」,不是一串十六进制。
++      const sw = document.createElement('span');
++      sw.className = 'sh-swatch';
++      sw.style.background = text;                    // style 属性,不是 innerHTML
++      sw.title = text;
++      dd.append(sw);
++    } else {
++      dd.textContent = text;                         // textContent，不是 innerHTML
++    }
+     dl.append(dt, dd);
+   }
+   if (!dl.children.length) {
+diff --git a/docs/agent/followups.md b/docs/agent/followups.md
+index b0abf32..37f5d83 100644
+--- a/docs/agent/followups.md
++++ b/docs/agent/followups.md
+@@ -34,3 +34,4 @@
+ - [ ] FU-20 · A · src=2026-08-07 补审直推 preview 的 15 个提交 · 2026-08-07 · preview 分支没有保护规则,15 个提交(49 文件/+4116 行,含 5 个自标 🔴)绕过 PR 直接推了上去。事后用 Codex + 生产 schema 机械 diff(23 表/217 列,零缺列)补审,没查出未识别的问题 —— 但**这不是流程有效的证据,是这次运气好**。机械修法:给 preview 开分支保护(要求 PR、禁止直推),和 main 一致。
+ - [ ] FU-21 · B · src=PR#190 评审(非阻塞) · 2026-08-07 · 没有 `GET /shares`:替客户预生成的 30 天公开链接,客户**既列不出来也撤不掉**(`POST /shares/:token/revoke` 存在,但拿不到 token 列表就等于没有)。`cleanupShares` 要到过期后 7 天才回收,地板 37 天。修法:加一个按 owner_user_id 列自己链接的端点(只回 token 前缀 + 创建时间 + 到期时间,不回完整 token —— 完整 token 只在建的时候给过一次),客户门户里能一键撤。
+ - [ ] FU-22 · C · src=PR#190 评审(非阻塞) · 2026-08-07 · `COMMERCIAL_TEXT` 的货币覆盖是**按今天的事实**收的:app 只出 USD(`sample.ts` `currency:'USD'`),所以规则里虽然带了 €£¥ 和 EUR/GBP,但**没有任何测试在跑非 USD 的真实路径**。哪天真支持了多币种,这条正则会以「看起来覆盖了」的样子继续绿着。修法:等多币种真做的时候,把币种表和这条正则绑在同一个来源上,别让它们各写一份。
++- [ ] FU-23 · B · src=2026-08-07 #190 review 环境实测截图 · 出图管线把 `model: openai_gi2` 水印**烧进了成品图右下角**,而这张图会出现在分享页上 —— 也就是发给客户老板/客户的客户的那一页。内部调试标记不该出现在对外的成品图里。改在 render/pipeline(不是前端能剥的)。
+diff --git a/scripts/deploy-review.sh b/scripts/deploy-review.sh
+index c98468e..631ebea 100755
+--- a/scripts/deploy-review.sh
++++ b/scripts/deploy-review.sh
+@@ -72,6 +72,25 @@ echo "✓ 公共出图 token 已取到(请确保它 == review Worker 的 PUBLIC_
+ echo "══ 1/3 apply schema → D1 $REVIEW_D1(--remote)══"
+ npx wrangler d1 execute "$REVIEW_D1" --remote --file=apps/api/schema.sql --config "$API_CFG"
+ 
++# 🔴 **schema.sql 之后必须再跑一遍 migrations。**
++#    `CREATE TABLE IF NOT EXISTS` 对【已存在的表】是 no-op —— 它不补列。
++#    所以给已有表加的每一列(shares.page_json / render_jobs.client_job_id / …)
++#    都只存在于 migrations/ 里,不跑就是「表在、列不在」,而症状是运行时
++#    `no such column: xxx`,不是部署失败 —— 这个洞 2026-08-07 一天之内咬了两次。
++#    ⚠️ ALTER 不幂等,重跑必报 duplicate column —— 所以这里【只把它当噪声吞掉】,
++#       不能用 set -e 让它中断部署。真正的解法是 FU-19 的 schema_migrations 账本 + 有序 runner。
++echo "══ 1b/3 apply migrations(已跑过的会报 duplicate column,属正常)══"
++for f in apps/api/migrations/*.sql; do
++  if npx wrangler d1 execute "$REVIEW_D1" --remote --file="$f" --config "$API_CFG" >/tmp/mig.$$.log 2>&1; then
++    echo "   ✓ $(basename "$f")"
++  elif grep -qiE "duplicate column|already exists" /tmp/mig.$$.log; then
++    echo "   · $(basename "$f") 已跑过,跳过"
++  else
++    echo "   ✗ $(basename "$f") 失败:" >&2; tail -5 /tmp/mig.$$.log >&2; rm -f /tmp/mig.$$.log; exit 1
++  fi
++  rm -f /tmp/mig.$$.log
++done
++
+ echo "══ 2/3 deploy Worker $REVIEW_WORKER(--env review)══"
+ npx wrangler deploy --env review --config "$API_CFG"
+ 
+

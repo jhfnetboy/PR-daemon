@@ -1,0 +1,293 @@
+diff --git a/apps/api/migrations/0009-render-jobs-kind.sql b/apps/api/migrations/0009-render-jobs-kind.sql
+new file mode 100644
+index 0000000..98be186
+--- /dev/null
++++ b/apps/api/migrations/0009-render-jobs-kind.sql
+@@ -0,0 +1,5 @@
++-- 出图任务分类(2026-08-08)。⚠️ ALTER 不幂等,重跑报 duplicate column。
++-- 为什么要这一列:上一版靠 `owner_user_id=NULL` 来表达「不进我的出图」,
++-- 副作用是【连库都不落】—— 于是回退到历史对话时,那一排缩略图全是灰的。
++-- 落库(持久化)和列表(我的出图)是两件事,拆开:owner 管归属,kind 管要不要在画廊里露面。
++ALTER TABLE render_jobs ADD COLUMN kind TEXT;
+diff --git a/apps/api/schema.sql b/apps/api/schema.sql
+index 6a0a3be..1997d03 100644
+--- a/apps/api/schema.sql
++++ b/apps/api/schema.sql
+@@ -229,7 +229,12 @@ CREATE TABLE IF NOT EXISTS render_jobs (
+   --    同 (归属, client_job_id) 第二次提交:直接返回已有的 call_id/result_token,
+   --    不扣配额、不 spawn Modal job。没有它,"自动重试"就是"每次重试真多花一次钱"。
+   client_job_id TEXT,
+-  created_at    INTEGER NOT NULL
++  created_at    INTEGER NOT NULL,
++  -- 🔴 **落库 ≠ 进「我的出图」。** 'finishes'=工艺缩略图:照样落 R2、照样在历史对话里回显,
++  --    但 /my-renders 过滤掉它(否则画廊被四张一批的缩略图淹掉)。
++  --    上一版用 `owner_user_id=NULL` 表达这件事,副作用是【连库都不落】——
++  --    回退到历史对话时那一排全是灰的(Jason 2026-08-08 实测)。
++  kind          TEXT
+ );
+ CREATE INDEX IF NOT EXISTS idx_render_jobs_user ON render_jobs(user_id, created_at DESC);
+ -- "我的出图"列表按账户查;清理按 delivered_at 找过期。
+@@ -247,6 +252,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_render_jobs_idem
+ --   ALTER TABLE render_jobs ADD COLUMN owner_user_id TEXT; ...box_type TEXT; ...product TEXT; ...provider TEXT;
+ --   ...r2_prefix TEXT; ...views TEXT; ...delivered_at INTEGER; ...img_bytes INTEGER; ...timings TEXT; ...has_pdf INTEGER NOT NULL DEFAULT 0;
+ --   ...client_job_id TEXT;  (T5.1.3 幂等键,配 idx_render_jobs_idem)
++--   ...kind TEXT;           (migrations/0009:落库 ≠ 进我的出图)
+ 
+ -- 出图【日额度】原子计数 —— 匿名公共 token 的烧钱面硬顶(VITE_API_TOKEN 内联进客户端、任何人可提取)。
+ -- ⚠️ 为什么不复用 render_jobs 的 COUNT:那是"查计数→提交→插入"三步,并发能同时越过检查【超卖】(Codex 审 #95 High)。
+diff --git a/apps/api/src/index.ts b/apps/api/src/index.ts
+index dfbfc0b..009d05b 100644
+--- a/apps/api/src/index.ts
++++ b/apps/api/src/index.ts
+@@ -476,16 +476,67 @@ async function authenticate(req: Request, env: Env): Promise<Me> {
+ }
+ 
+ // ─── 路由 ──────────────────────────────────────────────────
++/**
++ * 🔴 **把「去取图」从客户端手里拿走。**
++ *
++ * `delivered_at` 和落 R2 都发生在 `/render-result` 里 —— 而那个请求**只有浏览器会发**。
++ * `/render` 提交完就返回,之后服务端一个动作都没有。出图要 60–120 秒,客户在这段时间里
++ * 切个对话、跳去确认页、或者干脆关掉标签页(`chat.ts` 的 pagehide 还会**主动中止轮询**),
++ * 就再没人问后端要图了 —— GPU 的钱花了,图丢了,历史里那一格永远是灰的。
++ *
++ * Jason 2026-08-08 原话:「图是后端从 API 取回来的,取到了就该落库,怎么可能还需要等」。
++ *
++ * 这个扫描就是那个「后端自己去取」:捞近 2 小时内**有归属、还没交付**的任务,
++ * 逐个问一次 Modal,done 了就落库。
++ *
++ * ⚠️ 几条边界,都是有意的:
++ *  · 只捞 2 小时内的 —— 再老 Modal 那边多半也没了,徒劳地打它没意义。
++ *  · 一次最多 20 条 —— cron 有执行时间上限,宁可下一轮再扫,不要整批超时全丢。
++ *  · 单条失败只记日志、继续下一条 —— 一条坏图不该让整批停下。
++ *  · **不扣配额、不记成本** —— 钱在提交那一刻就花掉了,这里只是把已经买到的东西取回来。
++ */
++async function sweepUndelivered(env: Env, now: number): Promise<number> {
++  if (!env.RENDERS) return 0;
++  const rows = await env.DB.prepare(
++    'SELECT call_id FROM render_jobs ' +
++    ' WHERE delivered_at IS NULL AND owner_user_id IS NOT NULL AND created_at > ?1 ' +
++    ' ORDER BY created_at DESC LIMIT 20',
++  ).bind(now - 2 * 3_600_000).all<{ call_id: string }>();
++  let saved = 0;
++  for (const r of rows.results ?? []) {
++    try {
++      const result = await proxyRender(env, 'result', { call_id: r.call_id }) as Record<string, unknown>;
++      if (result?.status !== 'done') continue;
++      const n = await persistRender(env, r.call_id, result, Date.now());
++      if (n > 0) { saved++; console.log(`[SWEEP] 补回 ${r.call_id} ${n} 张`); }
++    } catch (e) {
++      console.warn(`[SWEEP] ${r.call_id} 取不回来:`, String(e).slice(0, 120));
++    }
++  }
++  return saved;
++}
++
+ export default {
+   // 定时清理(cron):删掉已过期的限流窗口行,防 render_quota 无限增长(Codex #95 follow-up,#30)。
+   //   window 过期(expires_at < now)后计数已无意义,直接删。见 wrangler.jsonc 的 triggers.crons。
+-  async scheduled(_c: ScheduledController, env: Env): Promise<void> {
++  async scheduled(c: ScheduledController, env: Env): Promise<void> {
+     const now = Date.now();
++    // 🔴 **两条 cron,别混着跑。** `*/5` 那条只补图(要够勤,否则客户回历史时图还没到);
++    //    日常清理(过期 session / 出图保留期 / 分享行 / 成本对账)是重活,一天一次就够 ——
++    //    让它们跟着 5 分钟跑一遍是白烧 D1 和 R2 的调用。
++    if (c.cron === '*/5 * * * *') {
++      const n = await sweepUndelivered(env, now).catch((e) => { console.error('[SWEEP] 整批失败', String(e).slice(0, 200)); return 0; });
++      if (n) console.log(`[SWEEP] 本轮补回 ${n} 次出图`);
++      return;
++    }
+     await env.DB.prepare('DELETE FROM render_quota_windows WHERE expires_at < ?1').bind(now).run();
+     await cleanupExpired(env.DB, now);   // 清过期 session / 已用+过期 magic
+     // 出图历史保留期清理:>N 天(默认 30,app_settings 可配)的 → 删 R2 图 + 删行(已交付、过了交易环节)。
+     await cleanupRenderHistory(env, now);
+     await cleanupShares(env as unknown as ShareEnv, now);   // 过期 7 天后的分享行
++    // 🔴 补回没人来取的图 —— 落库不该依赖客户端还开着(见 sweepUndelivered 的注释)。
++    const swept = await sweepUndelivered(env, now).catch((e) => { console.error('[SWEEP] 整批失败', String(e).slice(0, 200)); return 0; });
++    if (swept) console.log(`[SWEEP] 本轮补回 ${swept} 次出图`);
+     // 成本账本:重放 outbox 里到期的待补写行(不丢账);对账扫近 3 天"有出图无账"的缺口(回填不了会在明细缺,靠 admin 看)。
+     await replayOutbox(env, now).catch((e) => console.error('[COST-LEDGER] replayOutbox 失败', String(e).slice(0, 200)));
+     const gaps = await reconcile(env, now - 3 * 86_400_000).catch(() => [] as string[]);
+@@ -974,10 +1025,19 @@ async function route(
+       if (!res?.call_id) { await refundAll(); throw new HttpError(502, '渲染服务未返回任务号'); }
+       const resultToken = crypto.randomUUID() + crypto.randomUUID().slice(0, 8);
+       try {
+-        // owner_user_id=NULL:工艺缩略图不进"我的出图"历史(delivered_at 也永远不落 → /my-renders 过滤掉)。
++        // 🔴 **落库 ≠ 进「我的出图」。**
++        //    上一版这里写死 `owner_user_id=NULL`,注释说是「不进我的出图历史」——
++        //    但 /render-result 的落库分支要求 `job.owner_user_id`,所以副作用是
++        //    **这批图连库都不落**。表现:回退到历史对话,那一排缩略图全是灰的
++        //    (Jason 2026-08-08 实测:「那一片看不到图片,那不都是灰色嘛」)。
++        //    现在两件事分开:owner 管归属(要落库、要能回显),kind='finishes' 管
++        //    「别在画廊里露面」,由 /my-renders 过滤。
++        //    ⚠️ 匿名出图仍然 NULL —— 没有账户就没有归属,也就没有历史可回。
++        const finOwner = me.id && me.id !== 'public-render' ? me.id : null;
+         await env.DB.prepare(
+-          'INSERT INTO render_jobs (call_id,user_id,result_token,owner_user_id,box_type,product,client_job_id,created_at) VALUES (?1,?2,?3,NULL,?4,?5,?6,?7)',
+-        ).bind(res.call_id, rateKey, resultToken, String(b.box_type ?? ''), 'finishes-batch', cjid, Date.now()).run();
++          'INSERT INTO render_jobs (call_id,user_id,result_token,owner_user_id,box_type,product,client_job_id,kind,created_at) '
++          + 'VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)',
++        ).bind(res.call_id, rateKey, resultToken, finOwner, String(b.box_type ?? ''), 'finishes-batch', cjid, 'finishes', Date.now()).run();
+       } catch (e) {
+         await refundAll();
+         throw e;
+@@ -1032,8 +1092,11 @@ async function route(
+       need('render.create');
+       if (!me.id || me.id === 'public-render') return { ok: true, renders: [] };
+       const rows = await env.DB.prepare(
++        // ⚠️ `kind='finishes'` 是工艺缩略图:它【落库】(历史对话要回显),但**不进画廊** ——
++        //    一次四张,画廊会被它淹掉。用 COALESCE 兼容 0009 之前的老行(kind 为 NULL)。
+         'SELECT call_id, result_token, box_type, product, provider, views, delivered_at, created_at, has_pdf ' +
+-        'FROM render_jobs WHERE owner_user_id=?1 AND delivered_at IS NOT NULL ORDER BY created_at DESC LIMIT 100',
++        "FROM render_jobs WHERE owner_user_id=?1 AND delivered_at IS NOT NULL AND COALESCE(kind,'') <> 'finishes' " +
++        'ORDER BY created_at DESC LIMIT 100',
+       ).bind(me.id).all<{ views: string | null }>();
+       const renders = (rows.results ?? []).map((r) => {
+         let views: string[] = [];
+diff --git a/apps/api/src/persist-all.test.ts b/apps/api/src/persist-all.test.ts
+new file mode 100644
+index 0000000..3b960b8
+--- /dev/null
++++ b/apps/api/src/persist-all.test.ts
+@@ -0,0 +1,105 @@
++/**
++ * 「图必须落库,不管是缩略图还是照片级」—— 2026-08-08。跑:npx tsx apps/api/src/persist-all.test.ts
++ *
++ * 量三件事,每一件都对应一个客户看得见的症状:
++ *   ① /render-finishes 建的行【有 owner】—— 否则 /render-result 的落库分支根本不进,
++ *      回退到历史对话时那一排缩略图全是灰的(上一版就是这样,而注释说的是「不进我的出图」)。
++ *   ② 它【不出现在 /my-renders】—— 一次四张,画廊会被淹掉。
++ *   ③ 交付图【照常出现在 /my-renders】—— 别为了修 ① 把画廊也塞满。
++ *
++ * ⚠️ 断言打在**响应体**和**库里的行**上,不打在我以为的函数返回值上。
++ */
++import { DatabaseSync } from 'node:sqlite';
++import { readFileSync } from 'node:fs';
++import worker from './index';
++
++function d1(db: any): any {
++  return {
++    prepare(sql: string) {
++      return { sql, _a: [] as any[], bind(...a: any[]) { this._a = a; return this; },
++        async first() { return db.prepare(this.sql).get(...this._a) ?? null; },
++        async run() { const r = db.prepare(this.sql).run(...this._a); return { meta: { changes: r.changes } }; },
++        async all() { return { results: db.prepare(this.sql).all(...this._a) }; } };
++    },
++    async batch(sts: any[]) { const o = []; for (const s of sts) o.push(await s.run()); return o; },
++  };
++}
++
++let pass = 0, fail = 0;
++const ok = (n: string, c: boolean, d = '') => { c ? (pass++, console.log('  ✅ ' + n)) : (fail++, console.error('  ❌ ' + n + ' ' + d)); };
++
++const NOW = Date.now();
++const SESS = 'sess-u1-aaaaaaaaaaaaaaaaaaaaaaaa';
++const ORIGIN = 'https://review.test';
++
++function seed() {
++  const raw = new DatabaseSync(':memory:');
++  raw.exec(readFileSync('apps/api/schema.sql', 'utf8'));
++  raw.exec(`INSERT INTO users (id,name,role,email,active,pending,created_at)
++    VALUES ('u1','客户','customer','buyer@cmic.test',1,0,${NOW})`);
++  raw.exec(`INSERT INTO sessions (token,user_id,created_at,expires_at)
++    VALUES ('${SESS}','u1',${NOW},${NOW + 86_400_000})`);
++  return raw;
++}
++
++const ctx = { waitUntil() { /* noop */ }, passThroughOnException() { /* noop */ } } as any;
++
++async function hit(env: any, method: string, path: string, body?: unknown) {
++  const h: Record<string, string> = { 'CF-Connecting-IP': '1.2.3.4', cookie: `cmic_sess=${SESS}`, origin: ORIGIN };
++  const raw = body === undefined ? undefined : JSON.stringify(body);
++  if (raw !== undefined) { h['content-type'] = 'application/json'; h['content-length'] = String(new TextEncoder().encode(raw).length); }
++  const res = await worker.fetch(new Request('https://api.test' + path, { method, headers: h, body: raw }), env, ctx);
++  const text = await res.text();
++  let json: any = null; try { json = JSON.parse(text); } catch { /* 二进制 */ }
++  return { status: res.status, text, json };
++}
++
++async function main() {
++  console.log('图必须落库(缩略图 + 照片级):');
++  const raw = seed();
++
++  // Modal 的 submit 用 fetch 打过去 —— 拦住它,回一个固定 call_id。
++  const realFetch = globalThis.fetch;
++  globalThis.fetch = (async () => new Response(JSON.stringify({ call_id: 'fc-TEST-1' }), {
++    status: 200, headers: { 'content-type': 'application/json' },
++  })) as any;
++
++  const env = {
++    DB: d1(raw), RENDERS: undefined,
++    ADMIN_TOKEN: 'admin-token-xxxxxxxxxxxxxxxxxxxx',
++    APP_URL: ORIGIN, ALLOWED_ORIGINS: ORIGIN,
++    RENDER_URL: 'https://x--cmic-render-render-endpoint.modal.run', RENDER_TOKEN: 'rt',
++  } as any;
++
++  const made = await hit(env, 'POST', '/render-finishes', {
++    box_type: 'lidbase', box_glb: 'Z2xiLXN0dWI=', box_dims: [250, 180, 60],
++    product: 'watch', color: '#b08247', finishes: ['v1', 'v2'],
++  });
++  globalThis.fetch = realFetch;
++  ok('POST /render-finishes 建任务成功', made.status === 200, `status=${made.status} ${made.text.slice(0, 160)}`);
++
++  const row = raw.prepare("SELECT owner_user_id, kind FROM render_jobs WHERE call_id='fc-TEST-1'").get() as any;
++  // 🔴 变异对照:把 finOwner 改回 NULL,这条必红 —— 而它红了才等于「历史对话回退时缩略图还在」。
++  ok('① 工艺缩略图的行【有 owner】(否则 /render-result 的落库分支根本不进)',
++    row?.owner_user_id === 'u1', `owner=${row?.owner_user_id}`);
++  ok('  且被标成 kind=finishes', row?.kind === 'finishes', `kind=${row?.kind}`);
++
++  // 假装它已经交付(persistRender 会做的事),再看画廊
++  raw.exec(`UPDATE render_jobs SET delivered_at=${NOW}, r2_prefix='renders/fc-TEST-1/', views='["open"]' WHERE call_id='fc-TEST-1'`);
++  // 一条真正的交付图
++  raw.exec(`INSERT INTO render_jobs (call_id,user_id,result_token,owner_user_id,box_type,product,r2_prefix,views,delivered_at,created_at)
++    VALUES ('deliv-1','u1','tok','u1','lidbase','Watch','renders/deliv-1/','["open"]',${NOW},${NOW})`);
++
++  // ⚠️ 下面两条不能【空真】:行都没建成的话「不在画廊里」是白拿的。先钉住它存在。
++  const cnt = (raw.prepare("SELECT COUNT(*) n FROM render_jobs WHERE call_id='fc-TEST-1'").get() as any).n;
++  ok('  (前提)缩略图那一行确实落库了', cnt === 1, `count=${cnt}`);
++
++  const gal = await hit(env, 'GET', '/my-renders');
++  const ids = (gal.json?.renders ?? []).map((r: any) => r.call_id);
++  ok('② 缩略图【不进】我的出图(一次四张,会把画廊淹掉)', !ids.includes('fc-TEST-1'), JSON.stringify(ids));
++  ok('③ 交付图【照常进】我的出图(别为了修①把画廊也清空)', ids.includes('deliv-1'), JSON.stringify(ids));
++
++  console.log(`\n${fail ? '❌' : '✅'} persist-all: ${pass} 通过, ${fail} 失败`);
++  if (fail) process.exit(1);
++}
++void main();
+diff --git a/apps/api/wrangler.jsonc b/apps/api/wrangler.jsonc
+index 648c72c..e967f66 100644
+--- a/apps/api/wrangler.jsonc
++++ b/apps/api/wrangler.jsonc
+@@ -41,7 +41,7 @@
+   },
+   // 定时任务:每天 03:10(UTC)清理过期的 render_quota 窗口行(#30)。见 index.ts 的 scheduled()。
+   "triggers": {
+-    "crons": ["10 3 * * *"]
++    "crons": ["10 3 * * *", "*/5 * * * *"]
+   },
+ 
+   // ── review 环境:测「用户管理 + 出图历史」,完全独立于生产(独立 D1/R2/域名),不碰真实数据 ──
+@@ -75,7 +75,7 @@
+         "enabled": true
+       },
+       "triggers": {
+-        "crons": ["10 3 * * *"]
++        "crons": ["10 3 * * *", "*/5 * * * *"]
+       }
+     }
+   }
+diff --git a/package.json b/package.json
+index 4a43746..b6d318c 100644
+--- a/package.json
++++ b/package.json
+@@ -19,7 +19,7 @@
+     "test:slots": "tsx apps/web/test/resolve-slot.test.ts",
+     "test:cardkey": "tsx apps/web/test/card-key.test.ts",
+     "test:chips": "tsx apps/api/src/chips.test.ts",
+-    "test:api": "rc=0; for f in auth chat conversations cost email invites render-store routes-auth inquiry-submit render-idem share brief-context render-intent thread-html e2e; do tsx apps/api/src/$f.test.ts || { rc=1; echo \"❌ FAILED: apps/api/src/$f.test.ts\"; }; done; [ $rc = 0 ] && echo '✅ apps/api 15 套全通过'; exit $rc",
++    "test:api": "rc=0; for f in auth chat conversations cost email invites render-store routes-auth inquiry-submit render-idem share brief-context render-intent thread-html persist-all e2e; do tsx apps/api/src/$f.test.ts || { rc=1; echo \"❌ FAILED: apps/api/src/$f.test.ts\"; }; done; [ $rc = 0 ] && echo '✅ apps/api 16 套全通过'; exit $rc",
+     "test:gate": "tsx apps/web/test/render-gate.test.ts",
+     "test:insert": "tsx packages/geometry/test/insert.test.ts",
+     "test:dxf": "tsx packages/geometry/test/dxf.test.ts",
+

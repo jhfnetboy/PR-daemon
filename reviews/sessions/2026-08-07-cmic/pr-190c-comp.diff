@@ -1,0 +1,833 @@
+None of PyTorch, TensorFlow >= 2.0, or Flax have been found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+[compress_diff] 11 files → 11 full, 0 summarized, 0 skipped | 15940/80000 tokens
+diff --git a/apps/api/migrations/0008-shares-page-html.sql b/apps/api/migrations/0008-shares-page-html.sql
+deleted file mode 100644
+index 2047832..0000000
+--- a/apps/api/migrations/0008-shares-page-html.sql
++++ /dev/null
+@@ -1,2 +0,0 @@
+--- 分享页快照（2026-08-07）。⚠️ ALTER 不幂等，重跑报 duplicate column。
+-ALTER TABLE shares ADD COLUMN page_html TEXT;
+diff --git a/apps/api/migrations/0008-shares-page-json.sql b/apps/api/migrations/0008-shares-page-json.sql
+new file mode 100644
+index 0000000..99e8d82
+--- /dev/null
++++ b/apps/api/migrations/0008-shares-page-json.sql
+@@ -0,0 +1,3 @@
++-- 分享页图片快照（2026-08-07）。⚠️ ALTER 不幂等，重跑报 duplicate column。
++-- 只对【已存在 shares 表】的库跑；新库由 schema.sql 的 CREATE TABLE 直接带上这一列。
++ALTER TABLE shares ADD COLUMN page_json TEXT;
+diff --git a/apps/api/schema.sql b/apps/api/schema.sql
+index f345750..6a0a3be 100644
+--- a/apps/api/schema.sql
++++ b/apps/api/schema.sql
+@@ -477,6 +477,7 @@ CREATE TABLE IF NOT EXISTS shares (
+   owner_user_id  TEXT NOT NULL,                      -- 谁建的。**永不出现在响应里**，只用于 revoke 鉴权
+   design_json    TEXT NOT NULL,                      -- 白名单挑出的设计字段快照（无价格、无 PII）
+   assets_json    TEXT NOT NULL,                      -- [{view, key}] —— R2 key 冻在这里，也不出现在响应里
++  page_json      TEXT,                               -- 结构化图片块（只有 data:image/... 位图，不是 HTML）
+   created_at     INTEGER NOT NULL,
+   expires_at     INTEGER NOT NULL,                   -- 服务端算（30 天），客户端传什么都不看
+   revoked_at     INTEGER                             -- 撤销后读路径一律 404（不是 403 —— 403 等于承认它存在过）
+@@ -489,7 +490,13 @@ CREATE INDEX IF NOT EXISTS idx_shares_expiry ON shares(expires_at);
+ --    `JOIN render_jobs ... AND j.delivered_at IS NOT NULL`，客户还没出过照片级图时
+ --    查询返空 → 400，而前端只闪一下「Creating link…」就没动静了。
+ --    客户原话：「这不就是把当前页面去掉报价那一部分直接生成个静态页面吗？」—— 他是对的。
+--- 🔴 和 conversations.thread_html 同级的 PII：里面有客户原话和 logoText。
+---    但**分享页本来就是给外人看的**，所以这一列不按 owner 剥离 ——
+---    真正的防线是「存进来之前就已经剥掉价格」（前端剥 + 服务端断言）。
+-ALTER TABLE shares ADD COLUMN page_html TEXT;
++-- 🔴 **存的是结构化图片块，不是 HTML。** 评审 2026-08-07 拆穿了「前端剥 + 服务端断言」这句话：
++--    `assertNoCommercial()` 走的是键名，喂它字符串是**静默空操作**，服务端那一半根本没实现；
++--    而「克隆 .quote-left 子树」是默认放行，和 pickDesign 的默认拒绝正好反过来。
++--    现在 page_json 只放 `data:image/(png|jpeg|webp);base64,...`（`pickBlocks()` 白名单，
++--    无 svg、无外链），规格仍由 design_json 渲染 —— 分享页因此不需要 innerHTML。
++-- ⚠️ 上面 CREATE TABLE 里已含 page_json，**这里不放可执行 ALTER**：
++--    ALTER 不幂等，而 `db:schema` 打的是生产库 cmic、deploy-review.sh 是 set -euo pipefail，
++--    第二次部署会 abort 在 duplicate column（评审抓到，同一天我刚在 FU-19 写过这个坑）。
++-- 已有库补列(照 :247 的既定写法，单独跑 migrations/0008)：
++--   ALTER TABLE shares ADD COLUMN page_json TEXT;
+diff --git a/apps/api/src/index.ts b/apps/api/src/index.ts
+index 8841ed1..dfbfc0b 100644
+--- a/apps/api/src/index.ts
++++ b/apps/api/src/index.ts
+@@ -26,7 +26,7 @@ import {
+ import { chatTurn, type ChatMsg, type ChatBrief } from './chat';
+ import {
+   createShare, readShare, readShareAsset, revokeShare, cleanupShares,
+-  SHARE_READ_PER_MIN, SHARE_ASSET_PER_MIN, SHARE_CREATE_PER_DAY, SHARE_PAGE_MAX, type ShareEnv,
++  SHARE_READ_PER_MIN, SHARE_ASSET_PER_MIN, SHARE_CREATE_PER_DAY, type ShareEnv,
+ } from './share';
+ import {
+   writeCostEvent, summarize, todayTotals, detail as ledgerDetail,
+@@ -1185,7 +1185,11 @@ async function route(
+         if (!done) throw new HttpError(404, '链接不存在');   // 别人的 token 也走这条 —— 不泄漏"它存在"
+         return { ok: true, revoked: true };
+       }
+-      // 🔴 建链接也要限流 —— 「它要登录」不等于「它有节制」(自审抓到:读有限流,建没有)。
++      // 🔴 **参数先校验，配额后扣。** 上一版顺序反了:先 count+1、再 `id(b.conversation_id)`,
++      //    校验失败不退还。而前端进确认页 1.2 秒就无条件预生成一次 ——
++      //    刷几十次页面,客户当天真要分享时拿到 429(评审抓到)。
++      const convId = id(b.conversation_id, 'conversation_id');
++      const cardKey = str(b.card_key, 'card_key', 80);
+       const nowC = Date.now();
+       const dk = `d${Math.floor(nowC / 86_400_000)}`;
+       const dExp = (Math.floor(nowC / 86_400_000) + 1) * 86_400_000;
+@@ -1195,14 +1199,13 @@ async function route(
+       ).bind(`sharenew:${me.id}`, dk, dExp, SHARE_CREATE_PER_DAY).first());
+       if (!okCreate) throw new HttpError(429, '今天建的分享链接太多了,明天再来');
+       const r = await createShare({ id: me.id }, senv, {
+-        conversationId: id(b.conversation_id, 'conversation_id'),
+-        cardKey: str(b.card_key, 'card_key', 80),
++        conversationId: convId,
++        cardKey,
+         spec: b.spec,
+-        // 确认页快照(价格已由前端剥掉)。超限就【不传这个字段】,不抛 ——
+-        //    否则「快照太大」会让整个分享失败,而分享本来还能靠 design 字段降级。
+-        //    (和 thread_html 同一条教训:守卫在下游、上游先炸 = 守卫等于不存在。)
+-        pageHtml: typeof b.page_html === 'string' && b.page_html.length <= SHARE_PAGE_MAX
+-          ? b.page_html : undefined,
++        // 确认页图片快照。**原样交给 `pickBlocks()` 做白名单** —— 这一层不做任何形状判断,
++        //    「客户端已经剥过了」不是理由:浏览器从来不是边界,任何 inquiry.write 用户
++        //    都能直接 curl 一段任意内容上来(评审抓到)。
++        blocks: b.page_blocks,
+       }, Date.now());
+       if (!r.ok) throw new HttpError(400, r.error);
+       // 只回 token 和有效期。**不回完整 URL** —— 域名由前端拼,后端不该猜自己被挂在哪个域上。
+diff --git a/apps/api/src/share.test.ts b/apps/api/src/share.test.ts
+index d9acae9..904b1ea 100644
+--- a/apps/api/src/share.test.ts
++++ b/apps/api/src/share.test.ts
+@@ -394,6 +394,14 @@ async function main() {
+     const m = await hit(e8, 'POST', '/shares', { conversation_id: 'c1', card_key: 't1:a', spec: DIRTY_SPEC }, SESS);
+     const days = Math.round(((m.json?.expires_at ?? 0) - nowR) / 86_400_000);
+     ok('🔴 图只剩 5 天时,链接也只给到那时(不是 30 天)', days >= 4 && days <= 6, `给了 ${days} 天`);
++    // 🔴 **一天都不许多。** 上面那条 ±1 天的范围断言放过了 `Math.ceil` ——
++    //    向上取整会把到期时刻推到下一个 UTC 午夜,链接因此比 R2 里的图多活最多 24 小时,
++    //    正是它上面那行注释声称要防的情况(评审抓到,而当时没有任何测试会红)。
++    //    判据绑真实上界 imageDeath 本身,不绑「大概几天」。
++    const imageDeath = (nowR - 25 * 86_400_000) + 30 * 86_400_000;
++    ok('  🔴 到期时刻 ≤ 图的死期(Math.ceil 会让它超出去)',
++      (m.json?.expires_at ?? 0) <= imageDeath,
++      `expires_at 比图晚了 ${Math.round(((m.json?.expires_at ?? 0) - imageDeath) / 3_600_000)} 小时`);
+     // 图已经过了保留期 —— 直接拒
+     r8.exec(`UPDATE render_jobs SET created_at = ${nowR - 40 * 86_400_000}, delivered_at = ${nowR - 40 * 86_400_000} WHERE call_id = 'job1'`);
+     const dead = await hit(e8, 'POST', '/shares', { conversation_id: 'c1', card_key: 't1:a', spec: DIRTY_SPEC }, SESS);
+@@ -467,28 +475,77 @@ async function main() {
+     ok('  什么都没落库', row.n === 0, `落了 ${row.n} 行`);
+   }
+ 
+-  // ══ 页面快照:图变成可选(2026-08-07 Jason 实测后重做)════════════
++  // ══ 图片快照:图变成可选(2026-08-07 Jason 实测后重做,评审后从 HTML 改成结构化块)══
+   {
+     const rP = seed(); const eP = mkEnv(rP);
+-    const PAGE = '<section class="quote-left"><img alt="hero" src="x.png"><div class="views3d"></div></section>';
++    // 1×1 透明 PNG —— 真的能过 DATA_IMG 正则的最小位图
++    const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
++    const BLOCKS = [{ t: 'image', src: PNG, alt: 'Photo-quality sample' },
++                    { t: 'image', src: PNG, alt: '3D view — Opened', cap: 'Opened' }];
+ 
+     // 🔴 **没有任何落盘的图,也要能建链接。** 这是客户实测卡住的那条:
+     //    上一版强制 JOIN render_jobs AND delivered_at IS NOT NULL,查空就 400,
+     //    前端表现成「Creating link… 闪一下什么都没发生」。
+     rP.exec("DELETE FROM conversation_assets");
+     const noImg = await hit(eP, 'POST', '/shares',
+-      { conversation_id: 'c1', card_key: 't1:a', spec: DIRTY_SPEC, page_html: PAGE }, SESS);
+-    ok('🔴 没有图,只有页面快照 → 也能建链接', noImg.status === 200 && !!noImg.json?.token,
++      { conversation_id: 'c1', card_key: 't1:a', spec: DIRTY_SPEC, page_blocks: BLOCKS }, SESS);
++    ok('🔴 没有 R2 的图,只有图片快照 → 也能建链接', noImg.status === 200 && !!noImg.json?.token,
+       `status=${noImg.status} ${noImg.text.slice(0, 140)}`);
+ 
+     const tok = noImg.json?.token as string;
+     const got = await hit(eP, 'GET', `/share/${tok}`);
+-    ok('  匿名读得回快照', got.status === 200 && typeof got.json?.pageHtml === 'string',
+-      `status=${got.status}`);
+-    ok('  快照原样(不是被拼出来的)', got.json?.pageHtml === PAGE, String(got.json?.pageHtml).slice(0, 80));
+-    // 🔴 快照也不许带商务信息 —— 它和 design 走的是两条路,两条都要干净
+-    for (const bad of ['$', 'USD', 'MOQ', 'unitPrice', '12.34']) {
+-      ok(`  快照响应里没有「${bad}」`, !got.text.includes(bad), got.text.slice(0, 160));
++    const blocks = got.json?.blocks as Array<Record<string, unknown>> | undefined;
++    ok('  匿名读得回两块', got.status === 200 && Array.isArray(blocks) && blocks.length === 2,
++      `status=${got.status} n=${blocks?.length}`);
++    ok('  位图原样带回来', blocks?.[0]?.src === PNG, String(blocks?.[0]?.src).slice(0, 40));
++
++    // ── 🔴 白名单是【默认拒绝】,不是「清洗后放行」───────────────
++    // 每一条都对应一种真实的注入形状。**断言的是「这一块没进去」**,
++    // 不是「响应里没有那个字符串」—— 后者在 base64 里会假绿。
++    const rX = seed(); const eX = mkEnv(rX);
++    rX.exec("DELETE FROM conversation_assets");
++    const EVIL = [
++      { t: 'image', src: 'data:image/svg+xml;base64,PHN2Zz48c2NyaXB0PmFsZXJ0KDEpPC9zY3JpcHQ+PC9zdmc+', alt: 'svg' },
++      { t: 'image', src: 'https://evil.test/pixel.png', alt: 'tracking pixel' },
++      { t: 'image', src: 'javascript:alert(1)', alt: 'js url' },
++      { t: 'html', src: PNG, alt: 'wrong type' },
++      { t: 'image', alt: 'no src' },
++      'not-an-object',
++    ];
++    const evil = await hit(eX, 'POST', '/shares',
++      { conversation_id: 'c1', card_key: 't1:a', spec: DIRTY_SPEC,
++        page_blocks: [...EVIL, { t: 'image', src: PNG, alt: 'the only good one' }] }, SESS);
++    const evilTok = evil.json?.token as string | undefined;
++    ok('🔴 六种坏块全被丢掉,只剩那一块干净的', evil.status === 200 && !!evilTok, `status=${evil.status}`);
++    const evilGot = evilTok ? await hit(eX, 'GET', `/share/${evilTok}`) : null;
++    const eb = evilGot?.json?.blocks as Array<Record<string, unknown>> | undefined;
++    ok('  只回 1 块', Array.isArray(eb) && eb.length === 1, `n=${eb?.length}`);
++    ok('  且是干净那块', eb?.[0]?.alt === 'the only good one', String(eb?.[0]?.alt));
++    // 变异对照:把 pickBlocks 换成 `raw as ShareBlock[]`,上面两条必红。
++    ok('  没有 svg 混进来', !JSON.stringify(eb ?? []).includes('svg'), JSON.stringify(eb ?? []).slice(0, 120));
++    ok('  没有外链混进来', !JSON.stringify(eb ?? []).includes('evil.test'), '');
++
++    // ── 🔴 文字级剥价:`assertNoCommercial()` 补不上的那一半 ────────
++    // 评审原话:它量的是【键名】,喂它字符串两个分支都不进、静默返回。
++    // 变异对照:把 createShare 里的 `commercialTextIn` 那两行删掉,下面三条必红。
++    for (const bad of ['$1,234.00', 'Unit price', 'MOQ 500']) {
++      const rD = seed(); const eD = mkEnv(rD);
++      rD.exec("DELETE FROM conversation_assets");
++      const dirty = await hit(eD, 'POST', '/shares',
++        { conversation_id: 'c1', card_key: 't1:a', spec: DIRTY_SPEC,
++          page_blocks: [{ t: 'image', src: PNG, alt: 'view', cap: `Opened — ${bad}` }] }, SESS);
++      ok(`🔴 快照文字里带「${bad}」→ 400`, dirty.status === 400, `status=${dirty.status} ${dirty.text.slice(0, 120)}`);
++      const n = (rD.prepare('SELECT COUNT(*) AS n FROM shares').get() as { n: number }).n;
++      ok('  什么都没落库', n === 0, `落了 ${n} 行`);
++    }
++    // 反对照:板材厚度「1.25 mm」不许被冤枉(裸小数不在规则里就是为了它)
++    {
++      const rT = seed(); const eT = mkEnv(rT);
++      rT.exec("DELETE FROM conversation_assets");
++      const fine = await hit(eT, 'POST', '/shares',
++        { conversation_id: 'c1', card_key: 't1:a', spec: DIRTY_SPEC,
++          page_blocks: [{ t: 'image', src: PNG, alt: 'view', cap: 'Greyboard 1.25 mm' }] }, SESS);
++      ok('  「1.25 mm」不算价格(不能误杀)', fine.status === 200, `status=${fine.status} ${fine.text.slice(0, 120)}`);
+     }
+ 
+     // 什么都没有还是要拒 —— 否则那个链接打开是空白
+diff --git a/apps/api/src/share.ts b/apps/api/src/share.ts
+index 6f1fc8d..121ddf9 100644
+--- a/apps/api/src/share.ts
++++ b/apps/api/src/share.ts
+@@ -89,8 +89,31 @@ const DESIGN_KEYS = [
+  *    **名字骗了我自己**，Codex 实测抓到。
+  */
+ export const DESIGN_MAX_BYTES = 16 * 1024;
+-/** 页面快照上限。比 design 大得多 —— 它是整段 DOM(含内联 3D 画布的 data URL 会被前端剥掉)。 */
+-export const SHARE_PAGE_MAX = 512 * 1024;
++/**
++ * 页面快照上限（**整个 `page_json` 的 UTF-8 字节**）。
++ *
++ * 🔴 **上一版存的是整段 HTML，这是错的。** 评审 2026-08-07 拆穿了三件事：
++ *    ① `assertNoCommercial()` 走的是**键名**（`COMMERCIAL_KEY.test(k)`），
++ *       喂它一个字符串两个分支都不进、立刻返回 —— 所以「服务端断言」那一半
++ *       **不是漏调了，是用现有工具写不出来**；
++ *    ② `.quote-left` 是「选一个子树」，子树里**新加**的元素默认通过 ——
++ *       和 `pickDesign` 的默认拒绝正好反过来，下一个往里塞价格 chip 的提交就发出去了；
++ *    ③ 分享页 `innerHTML` 那段 HTML，而 cookie 是第一方同源 —— 注入的
++ *       `onerror` 能带凭证打 `/api/*`。
++ *
++ *    现在存的是**结构化图片块**：只有 `data:image/...` 的位图能进来，
++ *    规格仍由 `design` 白名单渲染（收件人因此**看得到规格**，上一版反而把规格弄丢了）。
++ */
++export const SHARE_PAGE_MAX = 700 * 1024;
++/** 快照最多几张图：hero 照片 + 3D + 4 张缩略图，再多是客户端出了问题。 */
++export const SHARE_BLOCKS_MAX = 8;
++/** 单张图上限。留给一张 1100px 宽的 JPEG 绰绰有余，挡住「整页 PNG 直接塞进来」。 */
++const BLOCK_SRC_MAX = 260 * 1024;
++/**
++ * 允许的图片 data URL。**没有 `svg`** —— SVG 会执行脚本，它不是位图。
++ * 也不允许外链 `http(s):` —— 那是给分享页装一个追踪像素的口子。
++ */
++const DATA_IMG = /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/;
+ const utf8Len = (s: string): number => new TextEncoder().encode(s).length;
+ /** 白名单挑出来的整棵树最多多少个节点。 */
+ const NODE_BUDGET = 600;
+@@ -172,6 +195,59 @@ export function assertNoCommercial(payload: unknown, where: string): void {
+   if (bad.length) throw new Error(`share payload leaked commercial/identity fields: ${bad.join(', ')}`);
+ }
+ 
++/**
++ * 商务信息的**文本级**反向对照。
++ *
++ * 🔴 `assertNoCommercial()` 量的是**键名**，喂它字符串是静默空操作 ——
++ *    评审原话：「服务端断言这一半没有任何一个现有 helper 能满足」。这个函数补的就是那一半。
++ *
++ * 同样**不是防线**（防线是 `pickBlocks` 只让位图进来）。它红了说明白名单破了。
++ *
++ * ⚠️ 数字规则只认**千分位形状**（`1,234` / `1,234.00`）。
++ *    不敢用裸小数 `\d+\.\d{2}` —— 板材厚度「1.25 mm」会被它冤枉，
++ *    而误杀的表现是分享链接建不出来、客户不知道为什么。
++ */
++export const COMMERCIAL_TEXT = /[$€£¥￥]|\b(?:USD|CNY|RMB|EUR|GBP)\b|\bMOQ\b|\bunit\s+price\b|\b(?:sub)?total\b|\blead\s*time\b|\btooling\b|\bdie\s*charge\b|\bsample\s+fee\b|\bper\s+(?:box|unit|pc|piece)\b|\d,\d{3}(?:\.\d{2})?\b/i;
++
++/**
++ * 快照里所有**给人看的文字**（`alt` / `cap`）拼起来查一遍。返回命中的那一段，干净则 null。
++ *
++ * ⚠️ **不查 `src`。** 那是 200KB 的 base64，字母表含大写 ——
++ *    「MOQ」「USD」这种三字母串在随机 base64 里迟早会撞上，
++ *    而误杀的表现是分享链接建不出来、没人知道为什么。
++ */
++export function commercialTextIn(blocks: ShareBlock[]): string | null {
++  const text = blocks.map((b) => `${b.alt} ${b.cap ?? ''}`).join(' \n ');
++  return COMMERCIAL_TEXT.exec(text)?.[0] ?? null;
++}
++
++/** 分享快照里的一块。**只有图片** —— 文字规格走 `design` 白名单那条路。 */
++export interface ShareBlock { t: 'image'; src: string; alt: string; cap?: string }
++
++/**
++ * 快照块的白名单。和 `pickDesign()` 同一个方向：**默认拒绝**。
++ *
++ * 认不出来的 `t`、不是 `data:image/...` 的 `src`、超长的说明文字 —— 一律丢掉，
++ * 不是「清洗后放行」。丢掉的后果是分享页少一张图（看得出来），
++ * 放行的后果是价格外流（没人会发现）。代价不对称。
++ */
++export function pickBlocks(raw: unknown): ShareBlock[] {
++  if (!Array.isArray(raw)) return [];
++  const out: ShareBlock[] = [];
++  for (const item of raw) {
++    if (out.length >= SHARE_BLOCKS_MAX) break;
++    if (!item || typeof item !== 'object') continue;
++    const b = item as Record<string, unknown>;
++    if (b.t !== 'image') continue;
++    const src = typeof b.src === 'string' ? b.src : '';
++    if (src.length > BLOCK_SRC_MAX || !DATA_IMG.test(src)) continue;
++    const alt = typeof b.alt === 'string' ? b.alt.slice(0, 120) : '';
++    const cap = typeof b.cap === 'string' ? b.cap.slice(0, 200) : '';
++    out.push({ t: 'image', src, alt, ...(cap ? { cap } : {}) });
++  }
++  return out;
++}
++
+ /** 不可枚举 token：32 字节 CSPRNG → base64url（43 字符，无公共前缀、不递增）。 */
+ export function newShareToken(): string {
+   const b = new Uint8Array(32);
+@@ -184,14 +260,17 @@ export function newShareToken(): string {
+ export interface CreateShareInput {
+   conversationId: string; cardKey: string; spec: unknown;
+   /**
+-   * 确认页当前 DOM 的快照，**价格部分已由前端剥掉**（2026-08-07 重做）。
++   * 确认页的图片快照（2026-08-07 重做）。**结构化的图片块，不是 HTML** —— 见 `SHARE_PAGE_MAX`。
+    *
+    * 🔴 上一版要求「先有一张落盘的照片级图」才让建链接 —— 客户还没出过图时直接 400，
+    *    而前端只闪一下「Creating link…」。客户原话：
+    *    「这不就是把当前页面去掉报价那一部分直接生成个静态页面吗？」——他是对的。
+    *    现在图是**可选增强**，不是前置条件。
++   *
++   * 类型是 `unknown`:它从匿名可写的请求体来,**必须过 `pickBlocks()`**,
++   * 声明成 `ShareBlock[]` 等于让类型系统替客户端背书。
+    */
+-  pageHtml?: string;
++  blocks?: unknown;
+ }
+ export type CreateShareResult = { ok: true; token: string; expiresAt: number } | { ok: false; error: string };
+ 
+@@ -233,11 +312,27 @@ export async function createShare(
+     if (born === null) return { ok: false, error: 'this image has no usable timestamp' };
+     oldestJob = Math.min(oldestJob, born);
+   }
+-  // 🔴 **没有图也能分享。** 图是增强,不是前置条件 —— 见 CreateShareInput.pageHtml 的注释。
++  // 🔴 **服务端白名单,不信客户端。** `blocks` 和 `spec` 走同一条规矩:
++  //    源里认识的才出去。评审抓到的不对称正是「`spec` 过 pickDesign、
++  //    紧挨着的 pageHtml 直接 bind」—— 任何 inquiry.write 用户都能 curl 一段任意内容上来,
++  //    浏览器从来不是边界。
++  const blocks = pickBlocks(input.blocks);
++  // 🔴 **文字级反向对照 —— `assertNoCommercial()` 补不上的那一半。**
++  //    它量的是键名,喂它字符串两个分支都不进、静默返回(评审原话:
++  //    「服务端断言这一半没有任何一个现有 helper 能满足」)。
++  //    这里拒绝而不是丢弃:文字里出现价格说明客户端那侧的剥离破了,那是要修的 bug,
++  //    静默降级会让它一直没人发现。
++  const dirty = commercialTextIn(blocks);
++  if (dirty) return { ok: false, error: `snapshot contains pricing (${dirty})` };
++  const blocksJson = blocks.length ? JSON.stringify(blocks) : null;
++  // 超限**丢掉快照、不抛** —— 分享还能靠 design 字段降级;上游抛了守卫就等于不存在。
++  const blocksOk = blocksJson !== null && utf8Len(blocksJson) <= SHARE_PAGE_MAX ? blocksJson : null;
++
++  // 🔴 **没有图也能分享。** 图是增强,不是前置条件 —— 见 CreateShareInput.blocks 的注释。
+   //    这一行【曾经是】`if (!assets.length) return 400` —— 客户还没出过照片级图时,
+   //    分享按钮就永远失败(而且失败提示被 finally 盖掉,表现成「Creating link… 卡住」)。
+-  //    但「什么都没有」还是要拒:没图又没页面快照,那个链接打开是空白。
+-  if (!assets.length && !input.pageHtml) {
++  //    但「什么都没有」还是要拒:没图又没快照,那个链接打开是空白。
++  if (!assets.length && !blocksOk) {
+     return { ok: false, error: 'nothing to share yet — open the quote page first' };
+   }
+ 
+@@ -253,21 +348,23 @@ export async function createShare(
+   const rawExpiry = now + SHARE_TTL_DAYS * 86_400_000;
+   // 🔴 **不许比图活得久。** render_jobs 的保留期也是 30 天,分享一张 25 天前的图 →
+   //    链接还有 5 天有效、而图已经 404,readShare 却仍返 200 且 views 非空。
+-  // 有图才受图的保留期夹逼；纯页面快照不依赖 R2，给满 30 天。
++  // 有图才受图的保留期夹逼；纯图片快照不依赖 R2，给满 30 天。
+   const imageDeath = assets.length ? oldestJob + RENDER_RETENTION_DAYS * 86_400_000 : Infinity;
+-  const expiresAt = Math.ceil(Math.min(rawExpiry, imageDeath) / 86_400_000) * 86_400_000;
++  // 🔴 **向下取整,不是向上。** `Math.ceil` 会把夹逼后的时刻推到下一个 UTC 午夜 ——
++  //    链接因此可以比 R2 里的图多活最多 24 小时,正是上面那条注释声称要防的情况(评审抓到)。
++  const expiresAt = Math.floor(Math.min(rawExpiry, imageDeath) / 86_400_000) * 86_400_000;
+   if (expiresAt <= now) return { ok: false, error: 'the image behind this card has already expired' };
+   await env.DB.prepare(
+-    'INSERT INTO shares (token, owner_user_id, design_json, assets_json, page_html, created_at, expires_at) ' +
++    'INSERT INTO shares (token, owner_user_id, design_json, assets_json, page_json, created_at, expires_at) ' +
+     'VALUES (?1,?2,?3,?4,?5,?6,?7)',
+-  ).bind(token, me.id, designJson, JSON.stringify(assets), input.pageHtml ?? null, now, expiresAt).run();
++  ).bind(token, me.id, designJson, JSON.stringify(assets), blocksOk, now, expiresAt).run();
+   return { ok: true, token, expiresAt };
+ }
+ 
+ export interface SharePayload {
+   design: Record<string, unknown>; views: string[]; expiresAt: number;
+-  /** 确认页快照（已剥价）。有它就直接渲染，没有才退回按 design 字段拼。 */
+-  pageHtml?: string;
++  /** 确认页的图片快照。规格**始终**走 `design` —— 快照只补图，不替代规格。 */
++  blocks?: ShareBlock[];
+ }
+ 
+ /**
+@@ -276,20 +373,24 @@ export interface SharePayload {
+ export async function readShare(env: ShareEnv, token: string, now: number): Promise<SharePayload | null> {
+   if (!token || token.length < SHARE_TOKEN_MIN) return null;
+   const row = await env.DB.prepare(
+-    'SELECT design_json, assets_json, page_html, expires_at FROM shares ' +
++    'SELECT design_json, assets_json, page_json, expires_at FROM shares ' +
+     ' WHERE token=?1 AND revoked_at IS NULL AND expires_at > ?2',
+-  ).bind(token, now).first<{ design_json: string; assets_json: string; page_html: string | null; expires_at: number }>();
++  ).bind(token, now).first<{ design_json: string; assets_json: string; page_json: string | null; expires_at: number }>();
+   if (!row) return null;
+ 
+   let design: Record<string, unknown> = {};
+   let assets: { view: string; key: string }[] = [];
+   try { design = JSON.parse(row.design_json) as Record<string, unknown>; } catch { design = {}; }
+   try { assets = JSON.parse(row.assets_json) as { view: string; key: string }[]; } catch { assets = []; }
++  // 🔴 **出库时再过一遍白名单。** 库里那行可能是【旧版白名单】写进去的,
++  //    也可能是将来某条绕过 createShare 的新写路径塞的。只做入库剥 = 只挡住今天这一条路。
++  let blocks: ShareBlock[] = [];
++  if (row.page_json) { try { blocks = pickBlocks(JSON.parse(row.page_json)); } catch { blocks = []; } }
+ 
+   // 只出 view 名，**不出 R2 key** —— key 是内部寻址，泄漏它等于泄漏存储布局
+   const payload: SharePayload = {
+     design, views: assets.map((a) => a.view), expiresAt: row.expires_at,
+-    ...(row.page_html ? { pageHtml: row.page_html } : {}),
++    ...(blocks.length ? { blocks } : {}),
+   };
+   assertNoCommercial(payload.design, 'design');    // 纵深：老快照可能是旧版白名单写进去的
+   return payload;
+diff --git a/apps/web/share.html b/apps/web/share.html
+index 3bdfd7a..096cb59 100644
+--- a/apps/web/share.html
++++ b/apps/web/share.html
+@@ -8,6 +8,17 @@
+   <meta name="robots" content="noindex, nofollow, noarchive" />
+   <!-- 🔴 不带 referrer:链接会被转进群、点开外链时别把 token 带到第三方站点的日志里。 -->
+   <meta name="referrer" content="no-referrer" />
++  <!-- 🔴 **纵深,不是主防线。** 主防线是 share.ts 只用 img.src / textContent、从不 innerHTML,
++       以及服务端 pickBlocks() 只让 data:image/(png|jpeg|webp) 位图进库。
++       CSP 在这儿是因为这一页【匿名可达、而 cookie 是第一方同源】(deploy-web.sh 用
++       VITE_API_URL="/api" + _worker.template.js 同源代理)——一旦哪天有人往回加了
++       innerHTML,注入的脚本就能带凭证打 /api/*。'unsafe-inline' 只给 style(上面那段 <style>),
++       script 不给,所以 onerror= 这类内联处理器执行不了。 -->
++  <meta http-equiv="Content-Security-Policy"
++        content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
++  <!-- ⚠️ 故意【不写 connect-src】:生产/review 都是同源 /api,但本地开发和 e2e 用的是
++       http://127.0.0.1:5999/api(跨源),写死 'self' 会把它们打死。
++       而 script-src 'self' 已经挡住了内联脚本执行 —— 没有脚本在跑,connect-src 也就没什么可管的。 -->
+   <link rel="stylesheet" href="/ds/styles.css" />
+   <style>
+     /* T3.3.2 分享页 —— 反馈 #18。
+@@ -45,19 +56,25 @@
+     .gone h1 { margin: 0 0 var(--space-sm); }
+     .gone p { color: var(--shade-50); margin: 0; }
+ 
+-    /* 快照渲染 —— Jason 2026-08-07：「图片还有 3D 的要居中」。
++    /* 快照图片 —— Jason 2026-08-07：「图片还有 3D 的要居中」。
+        确认页是左右两栏（左图右价），剥掉价格那栏之后左栏会孤零零贴在左边。
+-       这里给它一个居中的窄栏容器，看起来才像一页专门给人看的东西。 */
+-    .sh-snapshot { max-inline-size: 900px; margin-inline: auto; }
+-    .sh-snapshot img, .sh-snapshot canvas { display: block; margin-inline: auto; max-inline-size: 100%; height: auto; }
+-    .sh-snapshot .views3d { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--space-sm);
+-                            margin-block-start: var(--space-md); }
+-    .sh-snapshot .views3d .v3d { aspect-ratio: 1/1; border: 1px solid var(--hairline-light);
+-                                 border-radius: var(--radius-lg); overflow: hidden; position: relative;
+-                                 background: radial-gradient(120% 95% at 50% 18%, #9a9488, #625d54); }
+-    .sh-snapshot .views3d .v3d img { inline-size: 100%; block-size: 100%; object-fit: cover; }
+-    .sh-snapshot .viewer { display: grid; place-items: center; }
+-    @media (max-width: 640px) { .sh-snapshot .views3d { grid-template-columns: repeat(2, 1fr); } }
++       这里给它一个居中的窄栏，看起来才像一页专门给人看的东西。
++       ⚠️ 这些块由 share.ts 用 createElement 拼出来（img.src / textContent），
++          **不是 innerHTML 进来的 HTML** —— 见 share.ts 里那段注释。 */
++    .sh-shot { max-inline-size: 900px; margin-inline: auto;
++               padding-inline: clamp(20px,5vw,56px); }
++    .sh-shot figure { margin: 0 0 var(--space-md); display: grid; place-items: center; }
++    .sh-shot img { display: block; margin-inline: auto; max-inline-size: 100%; height: auto;
++                   border-radius: var(--radius-lg); }
++    .sh-shot figcaption { margin-block-start: var(--space-xs); color: var(--shade-50);
++                          font-size: var(--micro-size); text-align: center; }
++    /* 第一张是照片级大图,独占一行;后面 4 张 3D 视图排成一行 */
++    .sh-shot figure:not(:first-child) { display: inline-grid; inline-size: calc(25% - var(--space-sm));
++                                        vertical-align: top; }
++    .sh-shot > figure:not(:first-child) + figure { margin-inline-start: var(--space-sm); }
++    @media (max-width: 640px) {
++      .sh-shot figure:not(:first-child) { inline-size: calc(50% - var(--space-sm)); }
++    }
+ 
+     .foot { padding: 0 clamp(20px,5vw,56px) var(--space-xl); color: var(--shade-50); font-size: var(--micro-size); }
+   </style>
+diff --git a/apps/web/src/sample.ts b/apps/web/src/sample.ts
+index 73f5cbd..d11feb1 100644
+--- a/apps/web/src/sample.ts
++++ b/apps/web/src/sample.ts
+@@ -426,29 +426,56 @@ $('approve').onclick = () => { location.href = '/approve.html'; };
+  */
+ let sharePromise: Promise<{ token: string; expiresAt?: number } | null> | null = null;
+ 
++/**
++ * 能不能建分享链接。
++ *
++ * 🔴 `conversation_id` 是**必填**（服务端 `id()` 要求 `[A-Za-z0-9._-]{1,64}`）。
++ *    上一版无条件预生成，没有 `cmic.shareRef` 时必然 400 —— 而且是**扣完配额之后**的 400。
++ *    刷几十次确认页，客户当天真要分享时拿到 429（评审抓到）。
++ */
++function shareRef(): { conversationId: string; cardKey: string } | null {
++  let ref: { conversationId?: string; cardKey?: string } | null = null;
++  try { ref = JSON.parse(sessionStorage.getItem('cmic.shareRef') ?? 'null'); } catch { return null; }
++  const cid = typeof ref?.conversationId === 'string' ? ref.conversationId : '';
++  if (!/^[A-Za-z0-9._-]{1,64}$/.test(cid)) return null;
++  return { conversationId: cid, cardKey: typeof ref?.cardKey === 'string' ? ref.cardKey : '' };
++}
++
+ async function createShareLink(): Promise<{ token: string; expiresAt?: number } | null> {
+   if (!API) return null;
+-  let ref: { conversationId?: string; cardKey?: string } | null = null;
+-  try { ref = JSON.parse(sessionStorage.getItem('cmic.shareRef') ?? 'null'); } catch { ref = null; }
+-  const pageHtml = buildSharePage();
+-  if (!pageHtml && !ref?.cardKey) return null;      // 什么都没有,别浪费一次配额
++  const ref = shareRef();
++  if (!ref) return null;                            // 必然 400,别浪费一次配额
++  const blocks = await buildShareBlocks();
+   try {
+     const res = await fetch(`${API}/shares`, {
+       method: 'POST', credentials: 'include',
+       headers: { 'content-type': 'application/json' },
+       body: JSON.stringify({
+-        conversation_id: ref?.conversationId ?? '', card_key: ref?.cardKey ?? '',
+-        spec: sel, page_html: pageHtml,
++        conversation_id: ref.conversationId, card_key: ref.cardKey,
++        spec: sel, page_blocks: blocks,
+       }),
+     });
+     const d = await res.json() as { token?: string; expires_at?: number; error?: string };
+     if (!res.ok || !d.token) throw new Error(d.error ?? 'could not create the link');
++    try { sessionStorage.setItem('cmic.shareToken', JSON.stringify({ token: d.token, expiresAt: d.expires_at })); } catch { /* ignore */ }
+     return { token: d.token, expiresAt: d.expires_at };
+   } catch (err) { console.error('[share] 预生成失败', err); return null; }
+ }
+ 
+-// 页面稳定后静默预生成 —— 等 3D 画完，否则快照里的 canvas 是空的。
+-setTimeout(() => { sharePromise = createShareLink(); }, 1200);
++/**
++ * 进页面就静默把链接建好 —— 点的时候零等待。
++ *
++ * ⚠️ **`if (!sharePromise)` 不能省。** t<1200ms 就点按钮的话，
++ *    点击那条路已经赋过一次 `sharePromise`，定时器再覆盖一次 ——
++ *    两行 `shares`、两次配额，而弹窗显示的是 A 的 token、状态里存的是 B（评审抓到）。
++ *
++ * ⚠️ 刷新复用已建好的 token，**不重建** —— 否则每次 F5 白扣一个名额。
++ */
++try {
++  const cached = JSON.parse(sessionStorage.getItem('cmic.shareToken') ?? 'null') as { token?: string; expiresAt?: number } | null;
++  if (cached?.token) sharePromise = Promise.resolve({ token: cached.token, expiresAt: cached.expiresAt });
++} catch { /* ignore */ }
++setTimeout(() => { if (!sharePromise) sharePromise = createShareLink(); }, 1200);
+ 
+ $('talk').onclick = async () => {
+   const btn = $('talk') as HTMLButtonElement;
+@@ -470,52 +497,81 @@ $('talk').onclick = async () => {
+ };
+ 
+ /**
+- * 把确认页当前 DOM 抠成一份**去掉价格**的静态快照。
++ * 把确认页的**图片**抠成一份快照。
++ *
++ * ## 上一版存整段 HTML，那是错的（评审 2026-08-07 拆穿）
+  *
+- * ## 为什么是「只留白名单」而不是「删掉黑名单」
++ * 三条，每条都致命：
++ * 1. 服务端号称的「断言」不存在 —— `assertNoCommercial()` 量的是**键名**，
++ *    喂它一个 HTML 字符串两个分支都不进，静默返回。
++ * 2. 「克隆 `.quote-left` 子树」是**默认放行**：往那个容器里新加的任何东西
++ *    （下一个提交塞进去的价格 chip）自动跟着发出去。和 `pickDesign` 的默认拒绝正好反过来。
++ * 3. 分享页 `innerHTML` 那段 HTML，而 cookie 是第一方同源 ——
++ *    注入的 `onerror` 能带着凭证打 `/api/*`。
+  *
+- * 漏保留一个区块 = 分享页少块内容，客户看得出来。
+- * 漏删一个区块 = **价格外流**，而链接会被写进邮件、转进群，没人会发现。
+- * 代价不对称，所以**默认丢弃**：只有显式列出来的才留。
++ * ## 现在：只发位图，规格走 design
+  *
+- * ## 剥掉什么
++ * 快照 = hero 照片 + 4 张 3D 视图，全部是 `data:image/...`。
++ * 规格由分享页按 `design` 白名单自己渲染（收件人**因此看得到规格** ——
++ * 上一版把整个 `.quote-right` 剥掉，连规格一起弄丢了）。
+  *
+- * 整块 `.order`（总价 / 明细 / 三个按钮）和 `.qty`（阶梯报价表）——
+- * 它们是右栏的全部内容，所以直接不要 `.quote-right`。
+- * 左栏 `.quote-left`（大图 + 3D 视图 + 规格）原样留下。
++ * 于是分享页不需要 `innerHTML`，服务端 `pickBlocks()` 也真的能白名单：
++ * 认不出来的一律丢，和 `DESIGN_KEYS` 同一个方向。
+  *
+- * ⚠️ 3D 画布（`<canvas>`）截不进静态 HTML —— 换成它当下那一帧的位图。
++ * ⚠️ **不读 `#view` 那块交互画布。** 它的 renderer 没有 `preserveDrawingBuffer`
++ *    （`sample.ts` 上方那个离屏 renderer 才有），在 rAF 之外 `toDataURL` 拿到的是
++ *    一张**合法但全透明**的 PNG —— 不抛异常，于是空白图会被当成成功发走。
++ *    4 张视图来自那个设了标志的离屏 renderer，本来就是现成的。
+  */
+-function buildSharePage(): string | undefined {
+-  const left = document.querySelector('.quote-left');
+-  if (!left) return undefined;
+-  const clone = left.cloneNode(true) as HTMLElement;
+-
+-  // canvas 在静态页里是空白 —— 换成当前帧的位图
+-  const liveCanvases = left.querySelectorAll('canvas');
+-  const cloneCanvases = clone.querySelectorAll('canvas');
+-  cloneCanvases.forEach((c, i) => {
+-    const live = liveCanvases[i];
+-    let url = '';
+-    try { url = live ? live.toDataURL('image/png') : ''; } catch { url = ''; }
+-    if (url) {
+-      const im = document.createElement('img');
+-      im.src = url; im.alt = '3D preview'; im.style.cssText = 'width:100%;height:auto;display:block';
+-      c.replaceWith(im);
+-    } else { c.remove(); }
+-  });
++interface ShareBlock { t: 'image'; src: string; alt: string; cap?: string }
+ 
+-  // 交互控件在静态页里点了没反应 —— 去掉，别给假的可点感
+-  for (const el of clone.querySelectorAll('button, input, select, textarea, script')) el.remove();
++/** 单张图的上限，和服务端 `BLOCK_SRC_MAX` 对齐。 */
++const BLOCK_SRC_MAX = 260 * 1024;
+ 
+-  const html = clone.innerHTML;
+-  // 🔴 最后一道:整段 grep 一遍货币符号。剥价靠的是结构，这条是反向对照 ——
+-  //    它红了说明我漏了一个区块，而不是「幸好有它」。
+-  if (/[$￥]|\bUSD\b|\bRMB\b|\bCNY\b/.test(html)) {
+-    console.error('[share] 快照里还有货币符号，不发送 —— 说明剥价漏了区块');
+-    return undefined;
++/**
++ * 重编码成够小的 JPEG。
++ *
++ * 原图是 880×880 的 PNG（`setPixelRatio(min(dpr,2))` × `SZ=440`）——
++ * 四张带光影的这种图 base64 之后就撑爆了上限，而超限是**静默丢快照**，
++ * 表现成「分享页没有图」（评审抓到：功能实际是哑的）。
++ *
++ * ⚠️ 先铺白底再画 —— 离屏 renderer 是 `alpha:true`，直接转 JPEG 会得到黑底。
++ */
++function shrink(dataUrl: string, maxW: number, quality: number): Promise<string | null> {
++  return new Promise((res) => {
++    const im = new Image();
++    im.onload = () => {
++      const scale = Math.min(1, maxW / im.width);
++      const cv = document.createElement('canvas');
++      cv.width = Math.max(1, Math.round(im.width * scale));
++      cv.height = Math.max(1, Math.round(im.height * scale));
++      const g = cv.getContext('2d');
++      if (!g) { res(null); return; }
++      g.fillStyle = '#ffffff'; g.fillRect(0, 0, cv.width, cv.height);
++      g.drawImage(im, 0, 0, cv.width, cv.height);
++      const out = cv.toDataURL('image/jpeg', quality);
++      res(out.length <= BLOCK_SRC_MAX ? out : null);
++    };
++    im.onerror = () => res(null);
++    im.src = dataUrl;
++  });
++}
++
++async function buildShareBlocks(): Promise<ShareBlock[]> {
++  const blocks: ShareBlock[] = [];
++  let hero = '';
++  try { hero = sessionStorage.getItem('cmic.sampleImg') ?? ''; } catch { hero = ''; }
++  if (hero.startsWith('data:image')) {
++    const small = await shrink(hero, 1100, 0.82);
++    if (small) blocks.push({ t: 'image', src: small, alt: 'Photo-quality sample' });
++  }
++  // 4 张 3D 视图 —— 和报价单 PDF 同源(`lastViewUrls`),不重渲染。
++  const caps = ['Opened', 'Top', 'Side', 'Detail'];
++  for (let i = 0; i < lastViewUrls.length && i < 4; i++) {
++    const small = await shrink(lastViewUrls[i]!, 560, 0.8);
++    if (small) blocks.push({ t: 'image', src: small, alt: `3D view — ${caps[i] ?? ''}`.trim(), cap: caps[i] });
+   }
+-  return html.length > 512 * 1024 ? undefined : html;
++  return blocks;
+ }
+ 
+ /** 我们自己的复制框。**不弹系统分享面板** —— 那个给不出「不含价」这句话。 */
+diff --git a/apps/web/src/share.ts b/apps/web/src/share.ts
+index 950ba74..efdd6ae 100644
+--- a/apps/web/src/share.ts
++++ b/apps/web/src/share.ts
+@@ -57,7 +57,12 @@ async function main(): Promise<void> {
+   // 长度先在本地筛一道 —— 明显不是 token 的东西不值得打一次网络。
+   if (!API || token.length < 22 || !/^[A-Za-z0-9_-]+$/.test(token)) { showGone(); return; }
+ 
+-  let data: { design?: Record<string, unknown>; views?: string[]; expiresAt?: number; pageHtml?: string };
++  // ⚠️ `blocks` 的字段全声明成可选 —— 它从网络来，类型只是我们的期望，不是保证。
++  //    下面每一项都要在运行时再判一次（`b.t !== 'image'` / `startsWith('data:image/')`）。
++  let data: {
++    design?: Record<string, unknown>; views?: string[]; expiresAt?: number;
++    blocks?: Array<{ t?: string; src?: string; alt?: string; cap?: string }>;
++  };
+   try {
+     const res = await fetch(`${API}/share/${encodeURIComponent(token)}`);
+     // 🔴 撤销 / 过期 / 不存在，服务端一律 404 —— 这里也一视同仁，
+@@ -66,32 +71,6 @@ async function main(): Promise<void> {
+     data = await res.json() as typeof data;
+   } catch { showGone(); return; }
+ 
+-  /**
+-   * 🔴 **有页面快照就直接渲染它** —— 那是分享者当时真正看到的那一页（价格已剥）。
+-   *
+-   * 上一版只按 `design` 的字段重新拼一遍规格表：客户看到的和分享者看到的是**两个页面**，
+-   * 而且必须先有一张落盘的照片级图才建得出链接（没有就 400，前端表现成「Creating link… 卡住」）。
+-   * 客户原话：「这不就是把当前页面去掉报价那一部分直接生成个静态页面吗？」
+-   *
+-   * 按 `design` 拼的那条路留着当兜底 —— 老链接没有快照。
+-   */
+-  if (typeof data.pageHtml === 'string' && data.pageHtml) {
+-    const host = document.createElement('div');
+-    host.className = 'sh-snapshot';
+-    host.innerHTML = data.pageHtml;
+-    $('sh-hero').replaceWith(host);
+-    $('sh-views').remove();
+-    $('sh-specs').closest('section')?.remove();
+-    if (data.expiresAt) {
+-      const d = Math.max(0, Math.round((data.expiresAt - Date.now()) / 86_400_000));
+-      $('sh-foot').textContent = d > 0 ? `This link stops working in ${d} day${d === 1 ? '' : 's'}.` : 'This link stops working today.';
+-    }
+-    const title0 = typeof (data.design ?? {}).typeName === 'string' ? String((data.design ?? {}).typeName) : '';
+-    if (title0) $('sh-title').textContent = title0;
+-    ($('app') as HTMLElement).hidden = false;
+-    return;
+-  }
+-
+   const design = data.design ?? {};
+   const views = Array.isArray(data.views) ? data.views : [];
+ 
+@@ -116,10 +95,43 @@ async function main(): Promise<void> {
+   const title = fmt('typeName', design.typeName) ?? fmt('boxType', design.boxType);
+   if (title) $('sh-title').textContent = title;
+ 
+-  // ── 大图 + 其余视图 ────────────────────────────────────
++  // ── 快照图片（分享者当时看到的那几张）────────────────────
++  /**
++   * 🔴 **`img.src` + `textContent`，永不 `innerHTML`。**
++   *
++   * 上一版把服务端存的一整段 HTML `innerHTML` 进来。而 `deploy-web.sh` 用
++   * `VITE_API_URL="/api"` 构建、`_worker.template.js` 同源代理 —— 会话 cookie 是
++   * **第一方**、就在服务这个页面的 origin 上，注入的 `onerror` 能带凭证打 `/api/*`。
++   * 而这个应用本身在教收件人「这种链接可以放心打开」。
++   *
++   * 现在服务端只存 `data:image/(png|jpeg|webp)` 位图（`pickBlocks()` 白名单，
++   * 无 svg —— SVG 会执行脚本，它不是位图），这里也只当图片用。
++   */
++  const blocks = Array.isArray(data.blocks) ? data.blocks : [];
++  if (blocks.length) {
++    const shot = document.createElement('div');
++    shot.className = 'sh-shot';                       // 居中在 share.html 的 CSS 里
++    for (const b of blocks) {
++      if (!b || b.t !== 'image' || typeof b.src !== 'string' || !b.src.startsWith('data:image/')) continue;
++      const fig = document.createElement('figure');
++      const im = new Image();
++      im.alt = typeof b.alt === 'string' ? b.alt : '';
++      im.src = b.src;
++      fig.append(im);
++      if (typeof b.cap === 'string' && b.cap) {
++        const c = document.createElement('figcaption');
++        c.textContent = b.cap;                        // textContent，不是 innerHTML
++        fig.append(c);
++      }
++      shot.append(fig);
++    }
++    if (shot.children.length) $('sh-hero').replaceWith(shot);
++  }
++
++  // ── 大图 + 其余视图（老链接没有快照时的兜底：从 R2 取）────
+   const src = (v: string) => `${API}/share/${encodeURIComponent(token)}/asset/${encodeURIComponent(v)}`;
+-  const hero = $('sh-hero');
+-  if (views.length) {
++  const hero = document.getElementById('sh-hero');
++  if (hero && views.length) {
+     const first = views.includes('open') ? 'open' : views[0]!;
+     const im = new Image();
+     im.alt = 'Design preview';
+@@ -139,7 +151,8 @@ async function main(): Promise<void> {
+       fig.append(i2, cap);
+       grid.append(fig);
+     }
+-  } else {
++  } else if (hero) {
++    // 有快照时 #sh-hero 已经被替换掉了(hero 为 null),这句只在【两边都没有图】时说
+     hero.textContent = 'No preview image in this share.';
+   }
+ 
+diff --git a/docs/agent/followups.md b/docs/agent/followups.md
+index cea77b1..b0abf32 100644
+--- a/docs/agent/followups.md
++++ b/docs/agent/followups.md
+@@ -31,3 +31,6 @@
+ - [ ] FU-17 · C · src=T5.3 合并 preview 时发现 · 2026-08-07 · tasks-status-check 的盲区:它只在存在「已合 T5.x.x (#N)」行时才三方比对,所以「PR 合了但压根没补这一行」时,队列/标题/汇总表会【一致地】停在 BACKLOG,全绿。#176(T5.5.5) 就是这样漏的。离线可机械化的补法:拿 git log origin/preview --oneline 里的 (#N) 去比对已合列表,缺哪个报哪个。
+ - [x] FU-18 · B · src=2026-08-07 并发跑两个 preflight 时踩到 · 2026-08-07 · pii-guard-check.sh 的探针路径是固定的 apps/web/src/__pii_probe.ts,没有加锁也没有按进程区分。两个 check/preflight 并发跑时共用同一个文件:一个的 cleanup 会删掉另一个正在用的探针,而另一个的写入又会把【含真客户邮箱的】文件留在工作区和 git 索引里(它要 git add -N 才被扫到)。当晚实际发生过一次,表现是 PII 闸在一个刚 exit 0 的分支上突然红。修法:探针路径带 PID/随机后缀,或加文件锁串行化。注意这和 FU 里那条 trap EXIT INT TERM HUP 是两个独立缺陷。 **✅ 2026-08-07 已做**:路径带 PID + 启动清残留;并发验证 A/B 双绿零残留。
+ - [ ] FU-19 · A · src=2026-08-07 准备发 review 环境时发现 · 2026-08-07 · 没有迁移账本。apps/api/migrations/*.sql 现在有 7 个文件,但没有任何地方记录【哪个库跑过哪几条】——migrate.ts 是一次性的 localStorage 导入器,不是执行器;deploy-review.sh 只 apply schema.sql,而 CREATE TABLE IF NOT EXISTS 不给已有表补列(#168 的坑)。更糟的是 ALTER TABLE ADD COLUMN 不幂等,重跑报 duplicate column,所以也不能靠'每次都全跑一遍'兜底。当前只能靠人记得跑哪几条。修法:建一张 schema_migrations 表,写个 runner 按文件名顺序跑未执行的,每条记一行。
++- [ ] FU-20 · A · src=2026-08-07 补审直推 preview 的 15 个提交 · 2026-08-07 · preview 分支没有保护规则,15 个提交(49 文件/+4116 行,含 5 个自标 🔴)绕过 PR 直接推了上去。事后用 Codex + 生产 schema 机械 diff(23 表/217 列,零缺列)补审,没查出未识别的问题 —— 但**这不是流程有效的证据,是这次运气好**。机械修法:给 preview 开分支保护(要求 PR、禁止直推),和 main 一致。
++- [ ] FU-21 · B · src=PR#190 评审(非阻塞) · 2026-08-07 · 没有 `GET /shares`:替客户预生成的 30 天公开链接,客户**既列不出来也撤不掉**(`POST /shares/:token/revoke` 存在,但拿不到 token 列表就等于没有)。`cleanupShares` 要到过期后 7 天才回收,地板 37 天。修法:加一个按 owner_user_id 列自己链接的端点(只回 token 前缀 + 创建时间 + 到期时间,不回完整 token —— 完整 token 只在建的时候给过一次),客户门户里能一键撤。
++- [ ] FU-22 · C · src=PR#190 评审(非阻塞) · 2026-08-07 · `COMMERCIAL_TEXT` 的货币覆盖是**按今天的事实**收的:app 只出 USD(`sample.ts` `currency:'USD'`),所以规则里虽然带了 €£¥ 和 EUR/GBP,但**没有任何测试在跑非 USD 的真实路径**。哪天真支持了多币种,这条正则会以「看起来覆盖了」的样子继续绿着。修法:等多币种真做的时候,把币种表和这条正则绑在同一个来源上,别让它们各写一份。
+diff --git a/docs/design/deploy-checklist-2026-08-07.md b/docs/design/deploy-checklist-2026-08-07.md
+index 750b3f8..ddd8ea9 100644
+--- a/docs/design/deploy-checklist-2026-08-07.md
++++ b/docs/design/deploy-checklist-2026-08-07.md
+@@ -8,10 +8,11 @@
+ ## 0. 实测到的落差（2026-08-07 查的，不是推测）
+ 
+ ```
+-生产库 cmic:
+-  render_jobs.client_job_id   ❌ 缺  ← 迁移 0005 从没跑过
+-  shares 表                    ❌ 缺  ← 迁移 0006
+-  conversations.thread_html   ❌ 缺  ← 迁移 0007
++生产库 cmic（2026-08-07 21:0x 复查，0005/0006/0007 已跑上）:
++  render_jobs.client_job_id   ✅ 有
++  shares 表                    ✅ 有（7 列）
++  conversations.thread_html   ✅ 有
++  shares.page_json            ❌ 缺  ← 迁移 0008，本轮唯一要跑的
+ ```
+ 
+ **生产现在没有故障。** 最后一次 API 部署是 `2026-08-06T04:34Z`，
+@@ -23,20 +24,19 @@
+ ## 1. 顺序（不能颠倒）
+ 
+ ```bash
+-# ① 先跑迁移 —— 三条都没跑过，按序
++# ① 先跑迁移 —— 0005/0006/0007 已跑过，本轮只剩 0008
+ npx wrangler d1 execute cmic --remote --config apps/api/wrangler.jsonc \
+-  --file=apps/api/migrations/0005-render-jobs-client-job-id.sql
+-npx wrangler d1 execute cmic --remote --config apps/api/wrangler.jsonc \
+-  --file=apps/api/migrations/0006-shares.sql
+-npx wrangler d1 execute cmic --remote --config apps/api/wrangler.jsonc \
+-  --file=apps/api/migrations/0007-conversations-thread-html.sql
++  --file=apps/api/migrations/0008-shares-page-json.sql
+ 
+ # ② 验证真的跑上了（别信「没报错」= 成功）
+ npx wrangler d1 execute cmic --remote --config apps/api/wrangler.jsonc --json --command "
+ SELECT (SELECT COUNT(*) FROM pragma_table_info('render_jobs')    WHERE name='client_job_id') AS c5,
+        (SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='shares')             AS c6,
+-       (SELECT COUNT(*) FROM pragma_table_info('conversations')  WHERE name='thread_html')   AS c7"
+-# 期望：{"c5":1,"c6":1,"c7":1}
++       (SELECT COUNT(*) FROM pragma_table_info('conversations')  WHERE name='thread_html')   AS c7,
++       (SELECT COUNT(*) FROM pragma_table_info('shares')         WHERE name='page_json')     AS c8"
++# 期望：{"c5":1,"c6":1,"c7":1,"c8":1}
++# ⚠️ `wrangler d1 execute --remote` 偶发 `code 7403 not authorized` —— 重跑一次即通，
++#    不是权限坏了，别去改配置（2026-08-07 实测撞到过一次）。
+ 
+ # ③ 再部署 API
+ pnpm --filter @cmic/api run deploy
+@@ -74,5 +74,5 @@ pnpm --filter @cmic/web run deploy
+ 
+ - Web：Cloudflare Pages 回滚到上一个 `--branch main` 部署
+ - API：`npx wrangler rollback --config apps/api/wrangler.jsonc`
+-- **迁移不回滚** —— 三条都是**加列/加表**，旧代码不引用它们，留着无害。
++- **迁移不回滚** —— 都是**加列/加表**，旧代码不引用它们，留着无害。
+   强行 `DROP COLUMN` 反而有风险。
+

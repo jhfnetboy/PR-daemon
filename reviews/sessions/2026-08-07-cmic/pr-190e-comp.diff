@@ -1,0 +1,297 @@
+diff --git a/apps/web/src/labels.ts b/apps/web/src/labels.ts
+index 9f5b538..94f02cc 100644
+--- a/apps/web/src/labels.ts
++++ b/apps/web/src/labels.ts
+@@ -66,9 +66,25 @@ export const FINISH_LABEL: Record<string, string> = {
+   'none': 'No surface finish',
+ };
+ 
++/**
++ * 纸样（`texture.ts` 的 `PAPER_SWATCHES` 主键）。
++ *
++ * ⚠️ **这里重抄一份名字,而不是 import `PAPER_SWATCHES`** —— 那个 const 住在 499KB 的
++ *    `texture.ts` 里(纹理生成),而分享页是【匿名、要秒开】的一页:为三个字符串
++ *    给收件人下 129KB gzip 不合适(实测 share.html 会 modulepreload 整个 texture chunk)。
++ *    键的一致性由 `labels.test.ts` 钉住:两边都从 `PAPER_SWATCHES` 推导,漏一个就红 ——
++ *    和这个文件对 `WRAP_PAPER` 的做法同源。
++ */
++export const STOCK_LABEL: Record<string, string> = {
++  'kraft-yellow': 'Kraft',
++  'kraft-black': 'Black board',
++  'kraft-white': 'White board',
++};
++
+ export const paperLabel = (k: string): string => PAPER_LABEL[k] ?? fallback('paper', k);
+ export const laminationLabel = (k: string): string => LAMINATION_LABEL[k] ?? fallback('lamination', k);
+ export const finishLabel = (k: string): string => FINISH_LABEL[k] ?? fallback('finish', k);
++export const stockLabel = (k: string): string => STOCK_LABEL[k] ?? fallback('stock', k);
+ 
+ /** 仅供测试：清掉「只 warn 一次」的记忆，否则用例之间会互相吃掉对方的 warn。 */
+ export function __resetWarned(): void {
+diff --git a/apps/web/src/sample.ts b/apps/web/src/sample.ts
+index 08811c4..581b1ac 100644
+--- a/apps/web/src/sample.ts
++++ b/apps/web/src/sample.ts
+@@ -445,7 +445,16 @@ async function createShareLink(): Promise<{ token: string; expiresAt?: number }
+   if (!API) return null;
+   const ref = shareRef();
+   if (!ref) return null;                            // 必然 400,别浪费一次配额
+-  const blocks = await buildShareBlocks();
++  // 🔴 **`.catch` 不能省。** 上一轮给 buildShareBlocks() 加了 `await currentViewsReady`,
++  //    它因此继承了 renderViews3d() 的失败(WebGL context 耗尽时 `new WebGLRenderer` 会抛)。
++  //    而这一行在 try **外面** —— reject 会让 `sharePromise` 变成 rejected promise,
++  //    `$('talk').onclick` 里 `await sharePromise` 在一个没有 catch 的事件处理器里抛,
++  //    「现建一次」那条兜底分支永远走不到:**Share 按钮永久失效,而客户没有任何提示**。
++  //    (评审:B3 把「静默给出空快照」换成了「静默让按钮死掉」——顺利路径变响了、失败路径变更哑了。)
++  const blocks = await buildShareBlocks().catch((err) => {
++    console.error('[share] 视图没渲出来,只发规格', err);
++    return [] as ShareBlock[];
++  });
+   try {
+     const res = await fetch(`${API}/shares`, {
+       method: 'POST', credentials: 'include',
+@@ -483,7 +492,8 @@ try {
+   // 🔴 **只有和当前这一版设计对得上才复用。** 这一句是上一版没有的,而少了它
+   //    不是竞态、是【确定性地发旧 token】:模块求值时就读缓存,早于 shareRef() 被查,
+   //    于是 goToQuote() 刚写好的新 cardKey(颜色和变体就在 key 里)被完全忽略。
+-  if (cached?.token && now && cached.cid === now.conversationId && cached.cardKey === now.cardKey) {
++  const alive = typeof cached?.expiresAt !== 'number' || cached.expiresAt > Date.now();
++  if (cached?.token && alive && now && cached.cid === now.conversationId && cached.cardKey === now.cardKey) {
+     sharePromise = Promise.resolve({ token: cached.token, expiresAt: cached.expiresAt });
+   } else if (cached) {
+     try { sessionStorage.removeItem('cmic.shareToken'); } catch { /* ignore */ }
+@@ -497,13 +507,18 @@ $('talk').onclick = async () => {
+   if (!API) { done('Offline — cannot share'); return; }
+ 
+   // 预生成好了就直接弹 —— 零等待,这才是点击该有的手感。
+-  const ready = sharePromise ? await sharePromise : null;
++  // ⚠️ **`catch` 不能省**:一个 rejected 的 sharePromise 会让这个事件处理器直接抛,
++  //    下面的重建分支永远走不到(评审 N1)。接住它,当作「没预生成」处理。
++  const ready = sharePromise ? await sharePromise.catch(() => null) : null;
+   if (ready) { openShareModal(`${location.origin}/share.html?t=${ready.token}`, ready.expiresAt, ready.token); return; }
+ 
+   // 没赶上预生成(刚进页面就点 / 预生成失败)→ 现建一次,并把结果缓存起来
+   const old = btn.textContent;
+   btn.disabled = true; btn.textContent = 'Creating link…';
+-  sharePromise = createShareLink();
++  // 定时器已经发起过一次但还没回来时,复用它 —— 别再建第二条(两行 shares、两次配额)。
++  // ⚠️ 提示语要在【等待之前】就设上:3D 还没渲完时点,这一等是整套 WebGL + 5 次 JPEG 编码,
++  //    而上一版只在 sharePromise===null 那条分支设提示,表现又成了「点了没反应」(评审 Low)。
++  sharePromise ??= createShareLink();
+   const r = await sharePromise;
+   btn.disabled = false; btn.textContent = old;
+   if (r) openShareModal(`${location.origin}/share.html?t=${r.token}`, r.expiresAt, r.token);
+@@ -565,9 +580,17 @@ function shrink(dataUrl: string, maxW: number, quality: number): Promise<string
+       g.drawImage(im, 0, 0, cv.width, cv.height);
+       // 超限【降质重试】,而不是静默丢掉这一张 —— 丢了客户看不出来少了什么(评审 Low)。
+       let out = cv.toDataURL('image/jpeg', quality);
+-      for (const q of [0.7, 0.55]) {
++      // 降质**并降宽** —— 只降质的话 1100px 的 hero 在 0.55 下仍可能超限而被静默丢掉(评审 Low)。
++      for (const [q, w] of [[0.7, 0.8], [0.55, 0.64]] as Array<[number, number]>) {
+         if (out.length <= BLOCK_SRC_MAX) break;
+-        out = cv.toDataURL('image/jpeg', q);
++        const c2 = document.createElement('canvas');
++        c2.width = Math.max(1, Math.round(cv.width * w));
++        c2.height = Math.max(1, Math.round(cv.height * w));
++        const g2 = c2.getContext('2d');
++        if (!g2) break;
++        g2.fillStyle = '#ffffff'; g2.fillRect(0, 0, c2.width, c2.height);
++        g2.drawImage(cv, 0, 0, c2.width, c2.height);
++        out = c2.toDataURL('image/jpeg', q);
+       }
+       res(out.length <= BLOCK_SRC_MAX ? out : null);
+     };
+diff --git a/apps/web/src/share.ts b/apps/web/src/share.ts
+index e26110a..656b944 100644
+--- a/apps/web/src/share.ts
++++ b/apps/web/src/share.ts
+@@ -14,7 +14,7 @@
+  * `?t=<token>`。**永远不要把它写进 DOM** —— 分享页会被截图、会被投屏，
+  * 而截图里的 token 就是一把可以再传播一次的钥匙。
+  */
+-import { paperLabel, laminationLabel, finishLabel } from './labels.js';
++import { paperLabel, laminationLabel, finishLabel, stockLabel } from './labels.js';
+ 
+ const API = (import.meta.env.VITE_API_URL ?? '').replace(/\/+$/, '');
+ 
+@@ -27,27 +27,30 @@ const $ = (id: string) => document.getElementById(id)!;
+  *    而 `typeName`(「Lift off lid」)已经把同一件事说成了人话 ——
+  *    在一个发给客户老板的页面上写「Construction: lidbase」只会让人以为我们不专业。
+  */
+-const LABELS: Array<[string, string]> = [
+-  ['typeName', 'Box style'],
+-  ['variationName', 'Direction'],
+-  ['dims', 'Size'],
+-  ['paper', 'Board'],
+-  ['paperStock', 'Paper stock'],
+-  ['lamination', 'Lamination'],
+-  ['finish', 'Finish'],
+-  ['paperColor', 'Outside'],
+-  ['color', 'Outside'],
+-  ['innerColor', 'Inside'],
+-  ['logoText', 'Brand'],
+-  ['product', 'For'],
++type Kind = 'text' | 'colour' | 'dims' | 'paper' | 'lamination' | 'finish' | 'stock';
++const LABELS: Array<[string, string, Kind]> = [
++  ['typeName', 'Box style', 'text'],
++  ['dims', 'Size', 'dims'],
++  ['paper', 'Board', 'paper'],
++  ['paperStock', 'Paper stock', 'stock'],
++  ['lamination', 'Lamination', 'lamination'],
++  ['finish', 'Finish', 'finish'],
++  // ⚠️ 排在 `finish` 【之后】:两者常常是同一个值(`funnel.ts:113` 是 `m.name ?? finishLabel(m.finish)`),
++  //    去重保留先到的那个 —— 而「Finish」才是对的标签,「Direction」是错的(评审 N2)。
++  ['variationName', 'Direction', 'finish'],
++  ['paperColor', 'Outside', 'colour'],
++  ['color', 'Outside', 'colour'],
++  ['innerColor', 'Inside', 'colour'],
++  ['logoText', 'Brand', 'text'],
++  ['product', 'For', 'text'],
+ ];
+ 
+ /** 十六进制色值 —— 给人看的页面上不该出现 `#b08247` 这种东西,渲成色块。 */
+ const HEX = /^#[0-9a-f]{3,8}$/i;
+ 
+-function fmt(k: string, v: unknown): string | null {
++function fmt(kind: Kind, v: unknown): string | null {
+   if (v === null || v === undefined || v === '') return null;
+-  if (k === 'dims' && typeof v === 'object') {
++  if (kind === 'dims' && typeof v === 'object') {
+     const d = v as { l?: number; w?: number; h?: number };
+     if (!d.l || !d.w || !d.h) return null;
+     return `${d.l} × ${d.w} × ${d.h} mm`;
+@@ -57,9 +60,13 @@ function fmt(k: string, v: unknown): string | null {
+   //    分享页就是那第四个文件,而且是**所有客户面里最外面的一层**(匿名、会被转进邮件和群)。
+   //    2026-08-07 review 环境实测截图上确实是「Board: 157g双铜 / Lamination: 哑胶」。
+   if (typeof v === 'string') {
+-    if (k === 'paper') return paperLabel(v);
+-    if (k === 'lamination') return laminationLabel(v);
+-    if (k === 'finish') return finishLabel(v);
++    if (kind === 'paper') return paperLabel(v);
++    if (kind === 'lamination') return laminationLabel(v);
++    if (kind === 'finish') return finishLabel(v);
++    // 🔴 `paperStock` 也是内部标识符 —— 上一版漏了它,页面上写着「Paper stock: kraft yellow」。
++    //    根因是把翻译修在 `fmt()` 的字符串分支上,而不是修在【字段 → 翻译器】这张表上,
++    //    所以「哪个字段忘了接」这件事没有任何地方看得出来(评审 N2)。现在 Kind 是必填的。
++    if (kind === 'stock') return stockLabel(v);
+     return v.replace(/[-_]/g, ' ');
+   }
+   if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+@@ -96,14 +103,20 @@ async function main(): Promise<void> {
+   // ── 规格 ──────────────────────────────────────────────
+   const dl = $('sh-specs');
+   const seen = new Set<string>();
+-  for (const [key, label] of LABELS) {
++  const shown = new Set<string>();
++  for (const [key, label, kind] of LABELS) {
+     if (seen.has(label)) continue;                  // paperColor / color 同标签，先到先得
+-    const text = fmt(key, design[key]);
++    const text = fmt(kind, design[key]);
+     if (!text) continue;
++    // 🔴 **同一个值不重复出一行。** `variationName` 常常就是 finish 的文案
++    //    (`funnel.ts:113` 是 `m.name ?? finishLabel(m.finish)`),于是页面上会紧挨着出现
++    //    「Direction: Gold foil」和「Finish: Gold foil」—— 同一个值,上面那个标签还是错的(评审 N2)。
++    if (kind !== 'colour' && shown.has(text)) continue;
++    shown.add(text);
+     seen.add(label);
+     const dt = document.createElement('dt'); dt.textContent = label;
+     const dd = document.createElement('dd');
+-    if (HEX.test(text)) {
++    if (kind === 'colour' && HEX.test(text)) {
+       // 色块 + 不写 hex —— 收件人要看的是「什么颜色」,不是一串十六进制。
+       const sw = document.createElement('span');
+       sw.className = 'sh-swatch';
+@@ -121,7 +134,9 @@ async function main(): Promise<void> {
+     dl.append(dd);
+   }
+ 
+-  const title = fmt('typeName', design.typeName) ?? fmt('boxType', design.boxType);
++  // ⚠️ **兜底不用 `boxType`。** 把它从 LABELS 里拿掉只堵住了两个渲染点里的一个 ——
++  //    `typeName` 缺失时(老快照 / configure 路径)`<h1>` 里还是会出现 `lidbase`(评审 N2)。
++  const title = fmt('text', design.typeName);
+   if (title) $('sh-title').textContent = title;
+ 
+   // ── 快照图片（分享者当时看到的那几张）────────────────────
+diff --git a/apps/web/test/labels.test.ts b/apps/web/test/labels.test.ts
+index 04919f2..aa678b2 100644
+--- a/apps/web/test/labels.test.ts
++++ b/apps/web/test/labels.test.ts
+@@ -7,11 +7,12 @@
+  *
+  * 跑：`npx tsx apps/web/test/labels.test.ts`
+  */
+-import { paperLabel, laminationLabel, finishLabel, PAPER_LABEL, LAMINATION_LABEL, __resetWarned }
++import { paperLabel, laminationLabel, finishLabel, PAPER_LABEL, LAMINATION_LABEL, STOCK_LABEL, __resetWarned }
+   from '../src/labels.js';
+ // ⚠️ 用【相对到仓库根】的路径,不用 `@cmic/geometry` —— `apps/web/test/` 跑在 tsx 下,
+ //    解析不了 vite alias(本仓第五次撞这个坑,见 retry-policy.ts / fit.ts / notes.ts 的文件头)。
+ import { WRAP_PAPER } from '../../../packages/geometry/src/core/materials.js';
++import { PAPER_SWATCHES } from '../src/texture.js';
+ import { PROCESS_PRICES } from '../../../packages/quote/src/tables.js';
+ 
+ let fails = 0;
+@@ -88,5 +89,21 @@ const ok = (c: unknown, m: string) => { c ? console.log('  ✅', m) : (fails++,
+   } finally { console.warn = orig; }
+ }
+ 
++{
++  console.log('纸样词表：键从 PAPER_SWATCHES 推导，漏一个就红');
++  // 🔴 `STOCK_LABEL`(labels.ts)**故意重抄**了 PAPER_SWATCHES 的名字 —— 因为那个 const 住在
++  //    499KB 的 texture.ts 里,而分享页是匿名、要秒开的一页(实测会 modulepreload 整个 chunk)。
++  //    重抄的代价就是会漂,所以键的一致性必须由这里钉住:**加第四种纸样而不翻译 → 这条当场红**。
++  const swatchKeys = Object.keys(PAPER_SWATCHES);
++  ok(swatchKeys.length >= 3, `从 PAPER_SWATCHES 读到 ${swatchKeys.length} 种纸样(不是写死的)`);
++  for (const k of swatchKeys) {
++    ok(typeof STOCK_LABEL[k] === 'string' && STOCK_LABEL[k] !== '',
++      `纸样「${k}」有客户面英文名（分享页会把它直接渲给客户老板看）`);
++  }
++  for (const k of Object.keys(STOCK_LABEL)) {
++    ok(swatchKeys.includes(k), `STOCK_LABEL 里的「${k}」在 PAPER_SWATCHES 里还活着（别留死键）`);
++  }
++}
++
+ if (fails) throw new Error(`labels: ${fails} 条断言失败`);
+ console.log('\n✅ 词表全部通过');
+diff --git a/scripts/deploy-review.sh b/scripts/deploy-review.sh
+index 631ebea..2816e6c 100755
+--- a/scripts/deploy-review.sh
++++ b/scripts/deploy-review.sh
+@@ -77,16 +77,30 @@ npx wrangler d1 execute "$REVIEW_D1" --remote --file=apps/api/schema.sql --confi
+ #    所以给已有表加的每一列(shares.page_json / render_jobs.client_job_id / …)
+ #    都只存在于 migrations/ 里,不跑就是「表在、列不在」,而症状是运行时
+ #    `no such column: xxx`,不是部署失败 —— 这个洞 2026-08-07 一天之内咬了两次。
+-#    ⚠️ ALTER 不幂等,重跑必报 duplicate column —— 所以这里【只把它当噪声吞掉】,
+-#       不能用 set -e 让它中断部署。真正的解法是 FU-19 的 schema_migrations 账本 + 有序 runner。
+-echo "══ 1b/3 apply migrations(已跑过的会报 duplicate column,属正常)══"
++#
++# ⚠️ **不是所有迁移都能无脑重跑。** 0003 是【整表重建】(建新表→拷→DROP→RENAME),
++#    它自己的文件头就写着「建议每库只跑一次」,而且 DROP→RENAME 之间有一段无表窗口。
++#    无差别每次部署跑它一遍,正是那句话劝你别做的事 —— 所以显式跳过。
++#
++# ⚠️ **错误分类要窄。** 上一版 grep 到 `already exists` 就当「已跑过」——
++#    那会把 `table cost_ledger_new already exists`(= 上次跑到一半坏掉了,原表可能已经没了)
++#    也判成成功,green 着把损坏状态永久保留下来。只有【加列/加索引】重复才是幂等噪声。
++#
++#    根治是 FU-19 的 schema_migrations 账本 + 有序 runner;下面这段只是急救。
++SKIP_MIGRATIONS="0003-cost-ledger-chat-llm.sql"
++echo "══ 1b/3 apply migrations(重复的加列/加索引会被识别为已跑过)══"
+ for f in apps/api/migrations/*.sql; do
++  base=$(basename "$f")
++  case " $SKIP_MIGRATIONS " in
++    *" $base "*) echo "   ⤬ $base 跳过(整表重建,只该每库跑一次 —— 见文件头)"; continue ;;
++  esac
+   if npx wrangler d1 execute "$REVIEW_D1" --remote --file="$f" --config "$API_CFG" >/tmp/mig.$$.log 2>&1; then
+-    echo "   ✓ $(basename "$f")"
+-  elif grep -qiE "duplicate column|already exists" /tmp/mig.$$.log; then
+-    echo "   · $(basename "$f") 已跑过,跳过"
++    echo "   ✓ $base"
++  elif grep -qiE "duplicate column name|index .* already exists" /tmp/mig.$$.log; then
++    echo "   · $base 已跑过,跳过"
+   else
+-    echo "   ✗ $(basename "$f") 失败:" >&2; tail -5 /tmp/mig.$$.log >&2; rm -f /tmp/mig.$$.log; exit 1
++    # 到这儿的一律当致命 —— 包括 `table xxx already exists`(那多半是上次跑到一半)。
++    echo "   ✗ $base 失败:" >&2; tail -8 /tmp/mig.$$.log >&2; rm -f /tmp/mig.$$.log; exit 1
+   fi
+   rm -f /tmp/mig.$$.log
+ done
+

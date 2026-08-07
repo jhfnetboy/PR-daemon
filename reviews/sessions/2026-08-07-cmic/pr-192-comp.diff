@@ -1,0 +1,28 @@
+diff --git a/apps/web/src/chat-history.ts b/apps/web/src/chat-history.ts
+index 8acfc75..87603c4 100644
+--- a/apps/web/src/chat-history.ts
++++ b/apps/web/src/chat-history.ts
+@@ -205,7 +205,12 @@ export function mountDrawer(hooks: DrawerHooks): void {
+   railNew.onclick = async () => { await hooks.onNew(); };
+   veil.onclick = () => userToggle(false);
+   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !panel.hidden) userToggle(false); });
+-  $('hist-new').onclick = async () => { setOpen(false); await hooks.onNew(); };
++  // 🔴 **点了不自动收起。** 桌面上这个抽屉是【常驻导航】,不是弹层 ——
++  //    选一条历史就把导航关掉,下一次还要再开一遍(Jason 2026-08-07:
++  //    「点击之后左侧依然在,但我可以手动点击那个来收起」)。
++  //    ⚠️ 移动端仍要收:它是盖在对话上的 overlay,不收就看不见自己刚打开的东西。
++  const closeIfOverlay = () => { if (!isDesktop()) setOpen(false); };
++  $('hist-new').onclick = async () => { closeIfOverlay(); await hooks.onNew(); };
+ 
+   async function refresh() {
+     const list = $('hist-list'), note = $('hist-note');
+@@ -221,7 +226,7 @@ export function mountDrawer(hooks: DrawerHooks): void {
+         + `<span class="m">${rel(c.updated_at)} · ${c.turn_count} turns</span></button>`;
+     }).join('');
+     for (const el of list.querySelectorAll<HTMLElement>('.hist-item')) {
+-      el.onclick = async () => { setOpen(false); await hooks.onOpen(el.dataset.id!); };
++      el.onclick = async () => { closeIfOverlay(); await hooks.onOpen(el.dataset.id!); };
+     }
+   }
+ 
+
