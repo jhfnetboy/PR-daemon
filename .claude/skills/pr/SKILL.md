@@ -188,6 +188,31 @@ gh pr view N --repo OWNER/REPO --json state,mergedAt
 
 This applies to every review request, including re-reviews and user-directed `sp N` / `kms N` commands.
 
+### Step 0b — Rebase-only short circuit (added 2026-08-07, measured)
+
+On an incremental re-review, **before building any diff**, ask whether the head actually moved for a
+reason. A PR rebased onto a freshly-merged sibling gets a new head SHA and re-enters the queue with
+**zero new work**.
+
+```bash
+# For every file this PR has ever touched, diff the previously-reviewed head against the new one.
+for f in $(git diff --name-only <merge-base>..<new head>); do
+  n=$(git diff <last_reviewed_head_oid>..<new head> -- "$f" | wc -l)
+  printf "%-44s %s\n" "$f" "$n"
+done
+```
+
+If every file **this PR itself changed** shows 0 lines, it is a rebase: run R1 (never optional, see
+constraint #5), then **restate the previous verdict and STOP — do not run R2/R3/R4.** Say plainly in
+the review that the head moved by rebase, list the per-file 0-diff evidence, and confirm the prior
+blockers are byte-identical.
+
+Why this is worth a rule: on CoLivingOS/CMIC#165 a rebase re-queued the PR and a full 4-round pass
+would have spent three judgement rounds re-deriving conclusions that could not have changed. The
+increment vs. the last-reviewed head is NOT empty in that case — it contains the merged sibling's
+code — so the diff size alone will not tell you. A tell: **R1's findings all point at files the PR
+does not own** (it diffed a pre-rebase base). Treat that as corroboration, not as findings.
+
 ## Step 1 — Sync + discover PRs
 
 **At the start of every loop cycle, run with `--sync`** to mirror ALL open PRs into SQLite:
@@ -407,6 +432,23 @@ Codex challenges Opus R2's Medium+ findings (not R1 findings directly).
 > and is reliable under `--dangerously-skip-permissions` (validated on Self-FDE#63 / #139 / YAA#450).
 > Use `Agent(codex:codex-rescue)` only in an interactive session where you WANT the permission prompts.
 
+> 🔴 **Codex's sandbox is READ-ONLY and OFFLINE. Never put a command in its self-check that needs
+> either.** (Added 2026-08-07 after burning two consecutive R3 rounds.)
+>
+> `npx` / `pnpm` / `tsx` / `pip` all fail there — `npx` tries the registry and dies with
+> `ENOTFOUND`. Both times Codex behaved correctly: the prompt said 「不对就说出来并停下」 and it
+> stopped. The fault was mine, twice.
+>
+> - **Self-check commands: `grep` / `sed` / `cat` ONLY.** Two greps that must hit are enough to
+>   prove it is looking at the right tree.
+> - **Anything that needs executing, YOU run first** in the real environment and paste the result
+>   into the prompt as established fact ("I ran X, here is the output, treat it as given").
+> - Then ask Codex for what it is uniquely good at: **static reasoning over the source.** On CMIC#165
+>   it confirmed the measurement mechanism (「全局边缘投影会量背景」) from source alone, with no
+>   experiment; on #167 it went 6/6 with zero false positives on a purely static read.
+> - Tell it explicitly which findings are statically decidable so it does not stall trying to verify
+>   an empirical one.
+
 **Extract targeted hunks first (Sonnet executor):** for each Opus-confirmed/added Medium+ finding at `file:line`, extract ±20 lines from the compressed diff. One `HUNK <id>:` block per finding.
 
 ```
@@ -436,6 +478,31 @@ If Codex quota exhausted → skip R3, add note, Opus R4 covers with full diff.
 ### R4 — Opus final verdict + missed-finding scan
 
 Second Opus call. Gets full diff + all round context. Two jobs in one call.
+
+> 🔴 **Job 0, added 2026-08-07: explicitly task R4 with FALSIFYING this round's strongest finding.**
+> Name the finding, name the strongest counter-argument you can construct against it, and say that
+> if the counter holds the finding collapses. This is the single highest-value line in the R4 prompt
+> — measured four times in one session, and it moved severity in BOTH directions:
+>
+> | PR | What R4 was told to attack | Result |
+> |---|---|---|
+> | CMIC#165 | 「my composite box is a flat rectangle; a real box has shadows/reflections so it may carry far more energy」 | **Refuted the counter** (real box = 11.2% of pixels, 15.6% of edge energy) and then found the decisive fact nobody had: the positive control was invalid |
+> | CMIC#166 | 「how likely is a client-chosen id to match a phone pattern in practice?」 | **Downgraded** the finding: 200k samples of the real generator, 0 redactions — and redirected it to `product`, which does bite |
+> | CMIC#167 | 「is `sample.ts` a demo path? if so the High drops」 | **Ruled the counter out** — it is the customer's own download |
+> | CMIC#165 r3 | 「look for an outer `en`, hoisting, or a path where the callback fires later」 | **Ruled all out**, then escalated a sibling Low → High |
+>
+> A verdict round that only ratifies the earlier rounds is worth much less than one that tries to
+> break them. Also require R4 to **re-run the key mutation/experiment itself rather than inherit it**
+> — on CMIC#167 r2 it re-ran both mutations instead of trusting R2, and on #165 r3 it reproduced the
+> TDZ independently before calling it a net regression.
+
+> 🔴 **R2's Job 3 (same date): judge whether the author shipped a BETTER answer than the review
+> prescribed.** Reviewer prescriptions are often worse than what the author works out with full
+> context, and in a multi-round pipeline the most likely damage is an author dutifully implementing
+> the weaker fix. On CMIC#165 r4 the prescribed fix was an R2-side rebuild; the author instead
+> carried the note in the `thread.innerHTML` snapshot, which covers **both** restore paths with zero
+> network round-trips — the prescription covered neither. Say so out loud in the review when it
+> happens; it is a finding about the review, and it is worth more than another nit.
 
 ```
 Agent(subagent_type="general-purpose", model="opus", prompt="""
@@ -593,6 +660,59 @@ Words like "合 / ready / CI 会绿" in a message are **NOT** merge authorizatio
 - **2-round** = DeepSeek R1 ran + Opus verdict. Allowed ONLY for docs/chore/comment/version-bump with no `src/`/contract/auth/crypto/payment touch.
 - **4-round** = DeepSeek R1 (R1a+R1b) **actually called** → Opus R2 → **Codex R3 actually called** → Opus R4 verdict. REQUIRED for any security-sensitive PR (auth/crypto/payment/permission/.sol/.rs signing/challenge-binding/address-derivation). If you did not run DeepSeek and Codex, you may NOT write `[4-round]`.
 - If a model genuinely can't run (e.g. Codex API 529), say so explicitly in the verdict and downgrade the label to what ran (e.g. `[3-round, Codex unavailable]`) — never claim it.
+
+### Mutation testing: literal replacement + assert-hit, never a regex (HARD — added 2026-08-07)
+
+Mutation testing is the main tool for answering 「这条测试承不承重」, and it has one failure mode
+that silently inverts the answer: **a mutation that never applied looks exactly like a test that
+caught nothing.**
+
+```python
+# ✅ correct — a miss is an ERROR, not a false pass
+old = "str(b.boxType ?? b.box_type ?? 'lidbase', 'boxType', 40)"
+new = "str(b.boxType ?? 'lidbase', 'boxType', 40)"
+assert old in s, f"变异打不中: {old[:60]!r}"     # ← the whole point
+s = s.replace(old, new, 1)
+```
+
+```python
+# ❌ wrong — `re.sub` "succeeded" by matching a DIFFERENT site; the suite stays green and you
+#    conclude the test is not load-bearing. I did this THREE times in a row on CMIC#166.
+s2 = re.sub(r'b\.boxType\s*\?\?\s*b\.box_type', 'b.boxType', s, count=1)
+print("mutated:", s != s2)      # "True" here means nothing
+```
+
+Rules:
+- **Literal string + `assert old in s`.** Never a regex, never `count=1` on a pattern that can match
+  more than one site. `s != s2` is not evidence the intended line changed.
+- **Verify the mutation landed** before believing the test result — print the before/after of the
+  exact line if there is any doubt.
+- **Restore with `git checkout -- <file>`** and confirm `git status` is clean before moving on.
+- The author of CMIC#167 hit this same trap independently the same day and wrote it into their own
+  PR body: 「变异测试自己也需要先验证『变异真的生效了』—— 否则它会给出一个虚假的安心」.
+
+### Where R1 (DeepSeek-flash) actually pays (measured over ~10 rounds, 2026-08-06/07)
+
+Roughly **4/25 findings** survived across a full session. The distribution is not uniform, and it
+tells you how much weight to give R1 before you start:
+
+| Situation | R1 yield | Note |
+|---|---|---|
+| **Incremental round, `--prior-review` fed, prior findings ARE the subject** | best (≈2/4) | This is the one place it earns its slot — checking 「上一轮那条改干净没有」 |
+| Real code diff with new logic | occasional 1/3 | It hit a real `--write` anchor bug once |
+| First review of a large PR | ~0 | Missed a Critical, a High, and three Mediums across three PRs |
+| Pure-docs / long-document PRs | 0/12 | Worse: on a 1000-line doc **all three file:line anchors were fabricated** |
+
+Two recurring degradation shapes to recognize rather than debug:
+- **The same finding filed twice at two severities** (identical text at Medium and Low) — seen on
+  two consecutive PRs.
+- **A "finding" that self-refutes mid-sentence** and ends with 「No issue」 — it emitted its reasoning
+  as the finding.
+- On an incremental round, if R1's findings all name files the PR does not own, it diffed a
+  pre-rebase base — see the Step 0b short circuit.
+
+None of this licenses skipping R1 (constraint #5 is absolute). It licenses **not spending judgement
+rounds chasing it**: verify its findings cheaply, reject them with evidence, and move on.
 
 ### Credibility = mechanical evidence, not model count (HARD)
 

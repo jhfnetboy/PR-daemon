@@ -234,13 +234,63 @@ Run (NO nested code fence here — this whole template is one fenced block, and 
 close it early and cut off everything below, including the auto-stop and the lock removal):
   python3 scripts/idle_state.py check --window-minutes 60
   exit 0 -> still active, continue
-  exit 3 -> idle for over an hour:
-    CronList -> find the job whose prompt contains "[[start-loop]]" -> CronDelete it.
-    Print: "start-loop: idle 1h+, auto-stopped." Then stop — do not schedule anything else.
+  exit 3 -> idle for over an hour: apply the DEGRADE LADDER below (default) or auto-stop, per how
+            the patrol was started.
   any other exit -> treat as undecidable: do NOT stop the patrol, print the script's stderr.
 Remove the lock file (`rm -f "$LOCK"`) on EVERY path above, then append exactly one line:
 "start-loop: reviewed <k> PR(s), <minutes_since_progress from idle_state.py> min since last post".
 ```
+
+### The degrade ladder — idle should slow the patrol down, not kill it (added 2026-08-07)
+
+An hour of quiet usually means "nobody is pushing right now", not "stop watching". Auto-stop then
+costs a manual restart the moment work resumes. Default behaviour is therefore to **step the
+interval up one rung and keep going**:
+
+```
+5m → 10m → 15m → 20m → 30m → (stay at 30m forever)
+```
+
+Only these values are usable — they are the minute counts that divide 60 evenly, so `4-59/N`
+spacing stays uniform across the hour boundary (see "Parse the invocation").
+
+On `exit 3`:
+
+```
+CronList → find the job whose prompt contains "[[start-loop]]" → read its cron expression
+  · already `4-59/30 * * * *` → do NOTHING. Print "start-loop: idle 1h+, 已在 30 分钟档，保持。"
+  · otherwise → CronDelete it, then CronCreate:
+        cron      = `4-59/<next rung> * * * *`
+        recurring = true
+        prompt    = THE FIRED PROMPT'S OWN FULL TEXT, verbatim (you are holding it)
+    Print "start-loop: idle 1h+, 降频到 <next rung> 分钟一次（不停止）。"
+```
+
+⛔ **Never `CronDelete` without recreating.** A delete-without-create silently ends a patrol the user
+asked to keep running — and because cron jobs are session-only, there is nothing to notice it by.
+
+The fired prompt must carry this ladder inside itself, because `CronCreate` bakes the prompt at
+creation time: the job that recreates itself one rung slower has to hand its successor the same
+instructions. Keep the ladder text identical across rungs so the only thing that changes is the cron
+expression.
+
+**Auto-stop is still available** when the user asks for it ("跑一小时没动静就停"): keep the old
+behaviour — `CronDelete` and print `"start-loop: idle 1h+, auto-stopped."` — and say in the Step 5
+confirmation which of the two the job is carrying, since the two are indistinguishable from outside.
+
+### The lock: fixed threshold, and ALWAYS remove it on the way out
+
+Two rules learned the hard way on 2026-08-06/07:
+
+- **The staleness threshold is a fixed 3600s — do NOT scale it with the interval.** The old
+  "3 × interval" rule is fine at 20m but breaks below it: one 4-round review runs 15–25 minutes, so
+  at a 5-minute interval the 900s window expires *mid-review* and the next fire starts a second
+  cycle on top of the running one — exactly what the lock exists to prevent. The lock is refreshed
+  after every posted PR anyway, so its mtime already means "time since the last sign of progress".
+- **`rm -f "$LOCK"` on EVERY exit path, including the one where you stop early with PRs still
+  queued.** Observed 2026-08-06: a cycle ended after posting one review with a second PR still in
+  the queue, touched the lock as its progress refresh, and returned without removing it — the next
+  fire then skipped, and the queued PR waited a full extra cycle for no reason.
 
 > **Why this replaced the `idle_rounds` counter (2026-08-06).** The counter measured *cycles that
 > reviewed nothing*, which is not the same thing. That day two PRs were reviewed and posted **at
