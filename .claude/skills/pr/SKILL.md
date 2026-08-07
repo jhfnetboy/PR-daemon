@@ -213,6 +213,46 @@ increment vs. the last-reviewed head is NOT empty in that case — it contains t
 code — so the diff size alone will not tell you. A tell: **R1's findings all point at files the PR
 does not own** (it diffed a pre-rebase base). Treat that as corroboration, not as findings.
 
+### Step 0c — Recall: pull back what a previous round already knew (added 2026-08-07)
+
+A review session is **not** guaranteed to be the same conversation that reviewed this PR last time —
+the patrol cron dies with its session, and `review_watch.py` launches a **fresh** headless session per
+PR. So anything a previous round learned must be **fetched**, never assumed to be in context.
+
+Two cheap fetches, both before Step 1:
+
+```bash
+# ① This PR's own previous verdict — the increment is judged against IT, not against the PR body.
+gh pr view N --repo OWNER/REPO --json reviews \
+  -q '[.reviews[] | select(.author.login=="clestons")] | last | .state + "\n" + .body'
+
+# ② This PR's earlier rounds + the lesson each one recorded.
+#    ⚠️ `repo` is stored BARE (`CMIC`), not `owner/repo`.
+DB=$PR_DAEMON/reviews/model-evals/model-evals.sqlite
+sqlite3 "$DB" "SELECT '· '||substr(finished_at,1,16)||'  '||verdict||'  score='||score
+                      ||char(10)||'  '||summary
+               FROM model_review_runs WHERE repo='REPO' AND pr_number=N ORDER BY id;"
+
+# ③ The last few rounds across all PRs — where the 'how I got burned' notes live.
+sqlite3 "$DB" "SELECT '· '||repo||'#'||pr_number||'  '||summary
+               FROM model_review_runs WHERE summary IS NOT NULL AND summary <> ''
+               ORDER BY id DESC LIMIT 5;"
+```
+
+⚠️ **Do NOT use `model_eval_db.py provider-summary` or `prior-context` for this.** Both were tried
+(2026-08-07) and neither prints the `summary` column: `provider-summary` emits aggregate counts only,
+`prior-context` emits `score=N.N` and nothing else. They look like the right tool and silently give
+you nothing. Read the column directly.
+
+**Why ① is not optional on an incremental round:** the fix commit's message tells you what the author
+*believes* he fixed. Only the previous review tells you what was actually blocking, and **in what
+words** — so you can re-run *the same probe that found it* instead of inventing a new one. On
+CoLivingOS#74 that is exactly what settled it: the mutation that was green last round went red this
+round, and that comparison is only possible if you still have last round's mutation.
+
+⚠️ **Judge the fix with the tool that found the bug.** Reading the new code and finding it plausible
+is not verification — the previous round's code also looked plausible.
+
 ## Step 1 — Sync + discover PRs
 
 **At the start of every loop cycle, run with `--sync`** to mirror ALL open PRs into SQLite:
@@ -727,6 +767,43 @@ For security-sensitive PRs, **run the tooling — don't reason from reading**. D
   - **An op's commitment must bind the OPERATION/ENDPOINT itself** — two ops that can produce the same commitment (e.g. empty-label `create` vs `refresh`, same tag) are cross-replayable: the user's signature is over the commitment, so command-dispatch separation does NOT prevent replaying one op's assertion into another. The endpoint/op must be in the digest (distinct tag).
   - **Feed Codex BOTH sides of every coupling** (TA binding AND host delegate; SDK AND contract). If you only paste the changed side, Codex is blind to the inconsistency too — that's how my #121 Codex pass also missed the host delegate.
 - 🔴 **For commitment / signature schemes, byte-matching the digest is NOT enough — verify BOTH parties can actually OBTAIN every bound input at the moment they must compute it.** A commitment over a field the client can't know (server-assigned id, host-derived value) is *unsatisfiable* under strict mode even if the SDK and TA hash it identically. (Proven: I approved AirAccount#118 + aastar-sdk#138 mint-param binding — verified the digest matched byte-for-byte — but missed that `index`/`ttl`/`subject` are server-derived, so the client ceremony can't compute the commitment → strict mint would break. Reverted in AirAccount#120.) Ask: "at ceremony time, does the committing side already hold every committed field?" If not, the scheme is broken regardless of byte-parity.
+
+### Five mechanical habits, each bought with a real mistake (added 2026-08-07)
+
+All five are cheap, all five caught (or would have caught) something the same night. Run them as
+steps, not as things to remember.
+
+1. **After `git worktree add`, immediately print the commit it actually resolved to and compare it
+   with what `gh pr view` reported.** They can differ — a force-push between the two calls is normal.
+   *(CMIC#175: I recorded a review against `1421fe0e` while my worktree held `ffde325`. The findings
+   happened to still hold, so it cost nothing — this time. If the push had landed after my fetch I'd
+   have reviewed stale content and reported it as current.)*
+
+2. **When a comment, PR body, or doc cites a test / guard / script, grep for it right then.**
+   *(CMIC#176: the justification for narrowing a **PII guard** was "`test:pii-guard` has a
+   counter-control". Whole-repo grep: one hit — the sentence itself. Narrowing a security guard on a
+   test that does not exist. This is the same shape as a pointer into something the consumer cannot
+   see.)*
+
+3. **A consistency checker's blind spot is everything being consistently WRONG.** It verifies
+   agreement, not truth — and "nobody updated any copy" satisfies agreement. When reviewing one, do
+   not stop at "do contradictory copies go red"; also ask **"does an entire missing/absent entry go
+   red"**, and require an *independent* source of truth (git log, the real table, the source file).
+   *(CMIC#175: I approved a 3-way ledger checker after 4/4 mutations went red — all of them
+   contradiction mutations. #176 then merged without updating any of the three, and it stayed green.
+   The author found it, not me.)*
+
+4. **Any count that goes into a conclusion gets computed two different ways first.**
+   *(CMIC#175: my first pass counted backtick-quoted table names as statuses and produced
+   `DONE=19/READY=1`; tightened to the valid status words it was `21/2`. Those numbers were going
+   into the review. Same night I rejected a subagent's "213 multi-line templates" — it was 0.)*
+
+5. **When the control case fails, suspect your measuring apparatus before the thing under test.**
+   *(CMIC#176: my first PII counter-control had all six cases pass, including the positive control —
+   which reads as "the guard is completely blind". Actual cause: `scan_files` uses `git ls-files` and
+   my probe was untracked, plus `ARCHIVE` is hardcoded. The PR author independently hit the other half
+   of the same trap — his probe email was filtered by the gate's own `*example*` rule. **A result that
+   says "everything is broken" is far more often a broken harness.**)*
 
 ### Feed full context to DeepSeek and Codex (HARD — their errors are context-starvation)
 

@@ -106,6 +106,26 @@ def run_text(args: list[str], retries: int = 3) -> str:
 
 
 def read_scopes(path: Path) -> list[str]:
+    """本轮要扫的仓库 —— **走 `scan_scope.py`,不自己解析 `repos.conf`**。
+
+    ⚠️ 上一版这里有一份**自己的** `repos.conf` 解析器(去空行、跳 `#`)。
+       它和 `scan_scope.py` 读的是同一个文件、今天输出也逐条相同 ——
+       但那正是 CLAUDE.md「ONE list, ONE command」要消灭的形状:
+       同一份配置有两个读法,谁改了格式(加分节标记、加行内注释、改注释符)
+       都只会让其中一个跟着变,而**两边都不会报错**。
+
+       历史上这个仓库为「同一个事实写在 N 处」付过三次代价
+       (扫描范围三份、tasks.md 状态三份、卡片身份三份)。不留第四处。
+
+    `path` 保留是为了 `--config` 仍然能指向别的文件(测试/临时范围);
+    只有指着默认那份时才走 `scan_scope`,否则按原样解析。
+    """
+    if path.resolve() == DEFAULT_PRBOT_CONFIG.resolve():
+        here = str(Path(__file__).resolve().parent)
+        if here not in sys.path:          # 别每次调用都往 sys.path 前面塞一份
+            sys.path.insert(0, here)
+        import scan_scope  # noqa: PLC0415 —— 延迟导入:非默认配置时不需要它
+        return scan_scope.repos()
     scopes: list[str] = []
     for line in path.read_text(encoding="utf-8").splitlines():
         value = line.strip()
