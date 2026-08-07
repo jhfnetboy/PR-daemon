@@ -863,29 +863,15 @@ DeepSeek's false positives and Codex's "INSUFFICIENT_CONTEXT / can't fetch" are 
 - **Codex R3 (PK)**: pass the diff + the post-R2 findings + **the cross-layer source it must check** (e.g. both the SDK encoder and the on-chain/TA verifier, the op→flag mapping) inline. NEVER rely on Codex fetching the diff itself. Give it a concrete claim to refute and the evidence to refute it with.
   - 🔴 **Paste source VERBATIM — never hand-summarize a struct / domain / signature / type when feeding Codex.** Copy the exact lines from the file. If you retype or "simplify" a definition you WILL drop a field, and Codex will report a guaranteed false positive on the field you elided. (Proven: aastar-sdk#137 — I summarized an EIP-712 domain without its `chainId`; Codex immediately raised a bogus `[High]` cross-chain-replay finding. The field was in the actual code.) Whenever Codex flags a missing field/check, FIRST re-grep the real source before believing it — the omission is usually in your prompt, not the code.
 
-## v4 vs v3 Evaluation
+## v4 是既定管线 —— 别再跑 v4-vs-v3 评估（结案 2026-08-07）
 
-After every 5 PRs (or on demand), compare v4 vs v3 pipeline quality:
+这里原本挂着一张 v4-vs-v3 对照表、一条「跑够 10 个 v4 PR 再评」的指令，和一条回滚扳机。
+**实测 v4 自 2026-06-19 起已经跑了 155 个 PR** —— 是它自己那个决策点的 15 倍，回滚从未发生。
+一个 15 倍过期的决策点不是待办事项，是每轮 review 都要读一遍的噪音，所以删掉。
 
-**Metrics to track in model_eval_db:**
-| Metric | v3 baseline | v4 target | How to measure |
-|--------|-------------|-----------|----------------|
-| DeepSeek R1 false-positive rate | ~60% (this session) | < 40% | R1 rejected by Opus R2 / R1 total |
-| Unique security findings from R1b | 0 (no R1b in v3) | > 0 per security PR | count R1b-only confirmed findings |
-| Opus R2 independent findings | 0 (no Opus R2 in v3) | > 0 on non-trivial PRs | count R2_INDEPENDENT non-empty |
-| Codex challenge rate | ~20% of findings | stable | Codex CHALLENGE / total Codex input |
-| Final verdict quality | subjective | fewer RC-to-APPROVE flips | track post-review author feedback |
-
-**Run after 10+ v4 PRs:**
-```bash
-python3 /Users/jason/Dev/tools/PR-Daemon/scripts/model_eval_db.py provider-summary --limit 50
-# Filter by date > v4 launch (2026-06-19) to isolate v4 results
-```
-
-**Rollback trigger:** if DeepSeek false-positive rate doesn't improve after 10 PRs, OR Opus R2 costs make the loop prohibitive, revert:
-```bash
-cp ~/.claude/skills/pr/SKILL.md.bak-v3-20260619 ~/.claude/skills/pr/SKILL.md
-```
+v4 就是当前管线。真要重新评估某一环，用它自己的口子：constraint #5 的 flash 评级
+（`model_eval_db.py provider-summary --provider deepseek --model deepseek-v4-flash`）和
+下面的 triage 审计。回滚脚本仍在 `SKILL.md.bak-v3-20260619`，需要时自己 `cp`。
 
 ## Triage validation (run periodically)
 
