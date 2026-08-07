@@ -171,6 +171,13 @@ touch "$LOCK"
 Step A+B — Sync every scope and determine this cycle's target repos (dynamic, recomputed every fire):
   scope top8 ->  python3 scripts/start_loop_scope.py targets --limit 8
   scope all  ->  python3 scripts/start_loop_scope.py targets --all
+  narrowed   ->  python3 scripts/start_loop_scope.py targets --only <name>[,<name>]
+⛔ **Whatever the scope, it is computed by THIS ONE COMMAND. Never write repo names anywhere else
+   in this prompt** — not in the target list, not in the Skill invocation, not in the report format.
+   Narrowing goes through `--only`, which resolves names the same way `$pr add` does and which
+   `$pr list --only ...` will show back. (2026-08-06: a hand-written cron prompt with the repo name
+   baked in became a fourth, invisible source of scope that `$pr list` could not see — exactly what
+   the "ONE list, ONE command" consolidation exists to prevent.)
 That one command does the org-wide sync, plus a scoped sync for every pinned /
 out-of-org repo (failures isolated per repo — one dead pin never sinks the cycle), and
 prints the target list on stdout, one bare `OWNER/REPO` per line, in review order:
@@ -203,14 +210,21 @@ For each repo from Step A+B's stdout, in the order printed:
   RETURN instead of "sleep 300 and re-scan" — this outer cron will wake the patrol again next
   cycle, so an inner infinite wait would just block forever for nothing.
   ⚠️ EXCEPTION for any target repo NOT under AAStarCommunity / iDoris-ai / MushroomDAO:
-  pr's own ABSOLUTE CONSTRAINT #4 says "3 orgs only, never jhfnetboy personal
-  PRs" — that constraint does NOT apply to a repo that reached this list, because a repo
-  only gets here by being explicitly pinned by the user (`$start add`) or by being one of
-  the two standing scope-`all` exceptions (jhfnetboy/NextStop, jhfnetboy/AISalesMan, where
-  clestons already holds collaborator access). When invoking pr for such a repo,
-  explicitly state in the invocation that this is a pre-approved exception to constraint #4
-  for this repo only, so it proceeds instead of skipping. Do not generalize the exception to
-  any repo that is not on this cycle's printed target list.
+  pr's own ABSOLUTE CONSTRAINT #4 says "3 orgs only, never jhfnetboy personal PRs" — that
+  constraint does NOT apply to a repo that reached this list. **The authority is THIS CYCLE'S
+  PRINTED TARGET LIST, not any hard-coded set of repo names.** A repo only reaches that list by
+  going through `start_loop_scope.py`, which reads the one scope file the user controls
+  (`~/.config/prbot/repos.conf` ← `$pr add`), so being on it IS the user's authorization.
+  When invoking pr for such a repo, explicitly state in the invocation that this is a
+  pre-approved exception to constraint #4 **for that one repo**, so it proceeds instead of skipping.
+
+  ⛔ **Never grant the exception to a repo that is not on this cycle's printed list, and never
+  write a repo name into this template as a standing exception.** An earlier version of this file
+  justified the exception by naming two repos (`jhfnetboy/NextStop`, `jhfnetboy/AISalesMan`); by
+  2026-08-07 the pinned set also included `jhfnetboy/CMIC` and `jhfnetboy/CoLivingOS`, so the
+  written justification no longer covered the repos actually being patrolled — the same
+  "the restatement expires before the source does" failure this repo keeps re-learning. Derive it,
+  don't restate it.
   Keep a running total `k` of PRs actually reviewed (posted a verdict for) across all repos
   this cycle, then move to the next target repo.
 
@@ -234,9 +248,26 @@ Run (NO nested code fence here — this whole template is one fenced block, and 
 close it early and cut off everything below, including the auto-stop and the lock removal):
   python3 scripts/idle_state.py check --window-minutes 60
   exit 0 -> still active, continue
-  exit 3 -> idle for over an hour: apply the DEGRADE LADDER below (default) or auto-stop, per how
-            the patrol was started.
-  any other exit -> treat as undecidable: do NOT stop the patrol, print the script's stderr.
+  exit 3 -> idle for over an hour. DEFAULT = step the interval down one rung and KEEP GOING:
+      CronList -> find the job whose prompt contains "[[start-loop]]" -> read its cron expression
+        `4-59/1`|`4-59/2`|`4-59/3`|`4-59/4`|`4-59/5` -> next rung 10
+        `4-59/6`|`4-59/10`                           -> next rung 15
+        `4-59/12`|`4-59/15`                          -> next rung 20
+        `4-59/20`                                    -> next rung 30
+        `4-59/30`  -> ALREADY AT THE TOP. Do nothing. Print
+                      "start-loop: idle 1h+, 已在 30 分钟档，保持。" and continue.
+      To step down: CronDelete that job, then CronCreate with
+        cron      = `4-59/<next rung> * * * *`
+        recurring = true
+        prompt    = THIS PROMPT'S OWN FULL TEXT, verbatim (you are holding it)
+      Print "start-loop: idle 1h+, 降频到 <next rung> 分钟一次（不停止）。"
+      ⛔ NEVER CronDelete without recreating. Cron jobs are session-only — a delete-without-create
+         silently ends a patrol the user asked to keep running, and nothing will surface it.
+      (Only these rungs are usable: they divide 60, so `4-59/N` spacing stays uniform across the
+       hour boundary. If the user asked for AUTO-STOP instead, replace this whole block with:
+       CronDelete it, print "start-loop: idle 1h+, auto-stopped.", stop.)
+  any other exit -> treat as undecidable: do NOT stop the patrol, do NOT touch cron, print the
+                    script's stderr.
 Remove the lock file (`rm -f "$LOCK"`) on EVERY path above, then append exactly one line:
 "start-loop: reviewed <k> PR(s), <minutes_since_progress from idle_state.py> min since last post".
 ```
