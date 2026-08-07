@@ -410,6 +410,35 @@ For a PR that only touches human-read prose (`*.md` docs, backlog task/doc bodie
 
 A pure-docs PR should converge in **ONE round** unless it contains a substantive factual error. Rationale: cycling a prose PR through repeated REQUEST_CHANGES rounds for internal-precision nits costs far more (full reviewer + author round-trips, queue time) than the nit is worth — flag them once as suggestions and APPROVE. (This does NOT relax the bar for automation-consumed files under Step 4 — those are not "pure prose".)
 
+> 🔴 **Before calling a prose claim FALSE, enumerate its readings — the ambiguity is in the sentence,
+> not in your evidence.** (Added 2026-08-07; this is the one habit in this file that is about
+> adjudicating natural language rather than verifying code, and it exists because correct mechanical
+> evidence still produced a wrong conclusion.)
+>
+> Every other habit here assumes the claim is precise and the only question is whether the code
+> agrees. Prose breaks that assumption: a sentence can be false under the reading you picked and
+> true under one you did not. Mechanical evidence does not protect you — it makes you *more*
+> confident in the wrong reading.
+>
+> The step: write down the claim, list every mechanism it could plausibly name, and check the
+> cheapest one you have NOT yet checked before you write "contradicted by the repo's own state".
+>
+> *(CMIC#189, FU-20's 「而不是只保护 main」. I queried as repo owner: `branches/main` →
+> `protected: false`, `preview` likewise, owner `.type == "User"` so no org ruleset, `/protection`
+> and `/rulesets` both 403. Airtight — for the GitHub-branch-protection reading. R3 Codex then
+> pointed at `.github/workflows/ci.yml`: `on: push: branches: [main]` + `on: pull_request`, so a
+> direct push to `preview` runs NO CI while a push to `main` does. The mechanical asymmetry is real
+> and the sentence is literally true under that reading. My finding died; the author was right.)*
+>
+> Two corollaries worth taking:
+> - **Feed R3 the natural-language claim, not just your verdict on it.** Codex only caught this
+>   because the prompt handed it the sentence and said "try to refute" — a prompt that had said
+>   "confirm main is unprotected" would have confirmed it.
+> - **What survives a collapsed finding is usually still worth writing** — here, that branch
+>   protection is 403 on this repo's plan at all, so an A-priority follow-up's prescribed fix is
+>   un-actionable as written. Demote it into the review body as a fact; do not let it vanish with
+>   the finding.
+
 Go to Step 6.
 
 ## Step 5b — 4-round path (high risk)
@@ -471,6 +500,18 @@ Codex challenges Opus R2's Medium+ findings (not R1 findings directly).
 > forced a turn-wasting fallback). The direct `codex_pk.sh` Bash call runs `codex exec` in a worktree
 > and is reliable under `--dangerously-skip-permissions` (validated on Self-FDE#63 / #139 / YAA#450).
 > Use `Agent(codex:codex-rescue)` only in an interactive session where you WANT the permission prompts.
+>
+> ⏱️ **Pass an explicit Bash `timeout` of at least 480000 ms on that call.** `codex_pk.sh`'s own
+> hard cap is `CODEX_MAX_SECS=360` plus stall detection, but the **Bash tool defaults to 120 s** —
+> so the documented invocation is killed at 2 minutes *every time* unless you override it. What
+> makes this worth a rule rather than a footnote is the failure's SHAPE: `exit 143`, no output
+> file, nothing on stderr. That is indistinguishable from "Codex is down", and the natural next
+> move is to fall back to DeepSeek — silently downgrading R3 on a run where Codex was working
+> fine. (CMIC#189: killed at 120 s, re-run with `timeout: 480000` returned a clean 4/4 in ~5 min
+> and CHALLENGED the round's strongest finding. Falling back would have lost that.)
+> The outer kill leaves no orphan and does not trip the circuit breaker — verified after the fact
+> with `pgrep -fl "codex exec"` and by reading `codex-breaker.json` — so the only cost is the
+> wasted attempt, provided you do not misread it as an outage.
 
 > 🔴 **Codex's sandbox is READ-ONLY and OFFLINE. Never put a command in its self-check that needs
 > either.** (Added 2026-08-07 after burning two consecutive R3 rounds.)
@@ -784,6 +825,16 @@ steps, not as things to remember.
    counter-control". Whole-repo grep: one hit — the sentence itself. Narrowing a security guard on a
    test that does not exist. This is the same shape as a pointer into something the consumer cannot
    see.)*
+   ⚠️ **A repo-wide miss is not yet a finding — the runner may live OUTSIDE the repo.** Before
+   writing "cites a script that does not exist", also search `~/.claude/skills/`, `~/.claude/plugins/`,
+   and anything else on the invoking `PATH`. *(CMIC#189: `acceptance.md:60` and `progress.md:45` both
+   name `followups.sh count-open` as one of pilot's three delivery gates; `find` over the whole repo
+   returned only `followups.md`. I had the finding half-drafted. It lives at
+   `~/.claude/skills/pilot/scripts/followups.sh` — the docs were right and I was one keystroke from
+   filing a fabricated one.)* The productive move after locating it is to **run it against both sides
+   of the diff**: base vs head. That is the real check for an automation-consumed file, and it is
+   cheap — `count-open` went 15 → 19 with all four new lines parsing, which is what actually cleared
+   the PR's only machine-readable risk.
 
 3. **A consistency checker's blind spot is everything being consistently WRONG.** It verifies
    agreement, not truth — and "nobody updated any copy" satisfies agreement. When reviewing one, do
