@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Project Is
 
-PR-Daemon is a **3-tier PK-style automated PR review system** for open-source repositories (aastar / auraai / mycelium).
+PR-Daemon is a **3-tier PK-style automated PR review system** for open-source repositories (aastar / idoris / mycelium).
 
 **Primary mode — Claude Code on DeepSeek:**
 1. `./run-dpsk-claude.sh` starts Claude Code with `ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic`, routing all LLM calls to DeepSeek (cheap). Claude Code IS the primary reviewer.
@@ -30,7 +30,7 @@ All review artifacts go to `reviews/`. Watcher state is in `.state/pr-daemon/`. 
 # "Use $pr-daemon-loop to start the 24/7 review loop"
 
 # Headless / non-interactive:
-./run-dpsk-claude.sh -p "Use pr-daemon-loop. Start the continuous PR review daemon for jhfnetboy's open PRs across aastar, auraai, and mycelium. Post reviews as clestons. Run until stopped."
+./run-dpsk-claude.sh -p "Use pr-daemon-loop. Start the continuous PR review daemon for jhfnetboy's open PRs across aastar, idoris, and mycelium. Post reviews as clestons. Run until stopped."
 
 # Check status while running:
 ./watch.sh queue && ./watch.sh current
@@ -164,7 +164,7 @@ Business repos are checked out locally, never cloned to `/tmp`:
 | GitHub org | Local root |
 |-----------|-----------|
 | `AAStarCommunity` / `aastar` | `~/Dev/aastar` |
-| `AuraAI` / `auraai` | `~/Dev/auraai` |
+| `iDoris-ai` / `AuraAI`(旧名) | `~/Dev/auraai` |
 | `mycelium` | `~/Dev/mycelium` |
 
 Configured in `config/repo-roots.json`. Even when these are writable roots, **never modify business source, config, tests, or lock files**.
