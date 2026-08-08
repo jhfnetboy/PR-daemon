@@ -93,16 +93,29 @@ one to tell the user about.
 > an include-list entry (e.g. `jhfnetboy/CMIC`). Personal repos are NOT scanned by default (there are
 > hundreds); the include-list is the allowlist. Never review a personal PR that is not on that list.
 >
-> ⛔ **ABSOLUTE CONSTRAINT #5 — DeepSeek R1a is NEVER optional (added 2026-08-01, user reprimanded)**
-> Run R1a (`deepseek_review.py`, model pinned to `deepseek-v4-flash`) on **every single review round**,
-> full stop — new PR, incremental re-review of a fix commit, tiny diff, interactive session where you
-> could "just read it yourself faster", doesn't matter. "I can do a good review without it" is NOT a
-> valid reason to skip it — the point isn't just review quality, it's building an ongoing, comparable
-> DeepSeek-flash performance record (target: 20 rounds, started 2026-08-01, tracked via
-> `model_eval_db.py provider-summary` with `--provider deepseek --model deepseek-v4-flash` always
-> explicit on `record-run`) to decide flash vs. pro. Skipping R1 "this once because it's small/fast"
-> silently breaks that record and defeats the entire point — this happened once already
-> (AirAccount#191 re-review) and must not happen again.
+> ⛔ **ABSOLUTE CONSTRAINT #5 — DeepSeek R1a runs by default; exactly TWO structural exemptions**
+> (originally 2026-08-01 "never optional"; **the record it demanded is now complete — 170 rounds over
+> 80 PRs by 2026-08-08, 8.5× its own 20-round target — so the decision it was collecting for is made,
+> and the blanket rule is replaced by the conclusion.** Same shape as the v4-vs-v3 eval section deleted
+> the same day: an expired decision point that kept costing a round.)
+>
+> **The conclusion, from the 170-round record:** keep flash, but its job is **cheap hypothesis
+> generation on real code diffs**, not being a findings source. It has genuinely hit — `#190`'s two
+> Highs (non-idempotent ALTER; `page_html` missing `assertNoCommercial`), the pii-probe sweep deleting
+> a concurrent sibling's live file, the `/isn.t supported/i` dot — and once it was *wrong but pointed
+> the right way*, and following it up found the real bug. That is worth its ~40 seconds.
+>
+> **Run R1a on every round EXCEPT these two, where 0/N is structural rather than unlucky:**
+> 1. **Pure-docs / ledger PRs** — measured 0/12 then, still 0/N now; on a long document it has
+>    fabricated every `file:line` anchor it emitted.
+> 2. **Incremental rounds whose increment is fixes to YOUR OWN prior findings** — the findings are
+>    already known and written down, so there is nothing left for it to independently find. (Measured
+>    repeatedly on `CMIC#190`/`#194`/`#196`/`#197`: `--prior-review` made it *worse*, not better.)
+>
+> Everywhere else — new PR, real code diff, any increment that adds new logic — **run it**. "I can do
+> a good review without it" is still NOT a valid reason to skip: on a real code diff its hit rate is
+> low but non-zero, and the cost is one parallel call. Skipping it *there* has burned us before
+> (AirAccount#191 re-review).
 > After R1a returns, verify each of its findings against the actual code/diff yourself (don't just
 > trust it) and append ONE explicit line to the self-assessment (Step 8): a 1-5 rating of DeepSeek
 > v4-flash's performance THIS round + one sentence why (findings that held up under verification /
@@ -933,7 +946,7 @@ After posting the verdict for a PR, the **chat reply** must close with a compact
 🔎 自评 — OWNER/REPO#N
 - 轮数: <实际跑了几轮>  (skill 要求: <triage 要求几轮>)  → 一致? ✅/❌
 - 每轮每模型实际做了什么:
-  · R1 DeepSeek(flash): <喂了什么 context? 产出?>  — NOT OPTIONAL, no "未跑—原因" escape (见 ABSOLUTE CONSTRAINT #5)。
+  · R1 DeepSeek(flash): <喂了什么 context? 产出?>  — 默认必跑;只有两种豁免(纯文档/台账、增量=修我自己上一轮的 findings),且必须点名是哪一种(见 ABSOLUTE CONSTRAINT #5)。
     真没跑 = 本轮不合格，必须现在补跑再收尾，不能带着"未跑"过关。
   · R2 Opus: <读了什么/跑了什么工具(forge/cast/eth_call)/cross-layer 验了什么>
   · R3 Codex: <ran? 喂了什么 context inline? CHALLENGE/CONFIRM>  | 或 "未跑 — 原因(如 529)"
@@ -947,7 +960,7 @@ After posting the verdict for a PR, the **chat reply** must close with a compact
 
 Rules for the self-assessment:
 - **Be truthful about gaps.** If you skipped a round or a tool you should have run, say so here and either run it now or flag it — do NOT paper over it.
-- **R1 DeepSeek is the one exception with no "skip" escape hatch** — every other round (R2/R3/R4) may legitimately be "未跑 — 原因" per triage, but R1 must always have actually run (see ABSOLUTE CONSTRAINT #5). If you find yourself about to write "R1 未跑" here, stop and go run it before finishing the review.
+- **R1 DeepSeek has exactly TWO allowed skips** (pure-docs/ledger PR; increment that only fixes your own prior findings — see ABSOLUTE CONSTRAINT #5). Naming the exemption is required: write `R1 未跑 — 纯文档` or `R1 未跑 — 增量=修我自己上一轮的 findings`. **Any other reason is not a reason** — if you are about to write "R1 未跑" for a real code diff, stop and go run it before finishing the review.
 - If the round count or model usage **deviated from what the triage required**, the self-assessment must state the deviation AND the corrective action (run it now / re-review).
 - If the deviation reveals a **skill-process problem** (e.g. a step that's unrealistic, or context that should be auto-fed), include a concrete **skill-improvement recommendation** here, and offer to edit the skill.
 - This block is part of the terse chat reply [[feedback_terse_chat_output]] — keep it compact, but it is the one place where listing per-round/per-model detail is REQUIRED (not "see PR comment").
