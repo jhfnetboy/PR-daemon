@@ -60,7 +60,12 @@ NICKNAMES = {
     "self-fde-workbench": "workbench",
     "hack5-net": "hack5",
     "auraai-packages": "aura-pkg",
-    "agent-speaker": "speaker",
+    # 2026-08-12 iDoris-ai/agent-speaker 改名为 iDoris-ai/Hyphae。旧名留着做别名:
+    # GitHub 的 rename 重定向会让旧路径继续可解析,扫描结果里出现哪个名字取决于
+    # 数据是新拉的还是库里存着的旧行 —— 两个键都映到同一个简称,免得同一个仓库
+    # 在汇报里时而叫 speaker 时而叫 hyphae。
+    "agent-speaker": "hyphae",
+    "hyphae": "hyphae",
 }
 
 
