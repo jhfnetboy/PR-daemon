@@ -62,7 +62,11 @@ if [ "${PR_DAEMON_NO_POST:-0}" = "1" ]; then
   exit 0
 fi
 
+TMP_FILES=""
+cleanup_tmp() { [ -n "$TMP_FILES" ] && rm -f $TMP_FILES; return 0; }
+
 restore_main() {
+  cleanup_tmp
   if [ "${PR_DAEMON_RESTORE_MAIN:-1}" = "1" ]; then
     active=""
     for _ in 1 2 3; do
@@ -86,13 +90,30 @@ run_gh() {
 }
 
 if [ -n "$REVIEW_TOKEN" ]; then
-  ACTIVE_USER="$(GH_TOKEN="$REVIEW_TOKEN" gh api user -q .login)"
-  if [ "$ACTIVE_USER" != "$EXPECTED_USER" ]; then
+  # Identity preflight: FATAL on a mismatch, ADVISORY when the call itself fails.
+  #
+  # Why the split (2026-08-07 and 2026-08-18): GET /user has now twice returned 503 while
+  # POST /repos/.../reviews was perfectly healthy. The old fatal form killed the script in
+  # preflight, so a review that would have posted did not — and the failure looked like
+  # "GitHub is down for writes", which it was not. A preflight that cannot reach the API
+  # has learned NOTHING about the token's identity; treating "unknown" as "wrong" converts
+  # someone else's partial outage into a lost review.
+  #
+  # The wrong-account guard is not weakened: the POST response carries .user.login, which
+  # is the authoritative answer to "who did this get attributed to", and it is checked
+  # below. Failure modes trade in the right direction — worst case becomes "posted by the
+  # wrong account and told about it loudly", instead of "correct review silently not
+  # posted, on an endpoint that was never even asked".
+  ACTIVE_USER="$(GH_TOKEN="$REVIEW_TOKEN" gh api user -q .login 2>/dev/null || true)"
+  if [ -n "$ACTIVE_USER" ] && [ "$ACTIVE_USER" != "$EXPECTED_USER" ]; then
     echo "Review token belongs to $ACTIVE_USER, expected $EXPECTED_USER." >&2
     exit 1
   fi
-  # PAT mode: no account switching occurred, skip restore trap
-  trap - EXIT
+  if [ -z "$ACTIVE_USER" ]; then
+    echo "⚠️  identity preflight unreachable (GET /user failed) — proceeding; the POST response's .user.login is verified instead." >&2
+  fi
+  # PAT mode: no account switching occurred, so drop restore_main — but keep temp cleanup.
+  trap cleanup_tmp EXIT
 elif ! gh auth switch --hostname "$HOST" --user "$EXPECTED_USER" >/dev/null 2>&1; then
   cat >&2 <<EOF
 Review account is not available in gh credential store.
@@ -130,15 +151,28 @@ case "$MODE" in
 esac
 
 PAYLOAD="$(mktemp "${TMPDIR:-/tmp}/pr-review.XXXXXX")"
+RESPONSE="$(mktemp "${TMPDIR:-/tmp}/pr-review-resp.XXXXXX")"
+TMP_FILES="$PAYLOAD $RESPONSE"
 if [ "$MODE" = "--approve" ] && [ -z "$BODY_FILE" ]; then
   jq -n --arg event "$EVENT" '{event:$event}' > "$PAYLOAD"
 else
   jq -n --rawfile body "$BODY_FILE" --arg event "$EVENT" '{body:$body,event:$event}' > "$PAYLOAD"
 fi
-run_gh api --method POST "repos/$REPO/pulls/$PR/reviews" --input "$PAYLOAD" >/dev/null
+run_gh api --method POST "repos/$REPO/pulls/$PR/reviews" --input "$PAYLOAD" > "$RESPONSE"
+
+# Authoritative identity check: who GitHub actually attributed this review to. This is the
+# check the preflight above only approximates — it runs on the same request that did the
+# write, so it cannot disagree with reality the way a separate GET can.
+POSTED_AS="$(jq -r '.user.login // empty' "$RESPONSE" 2>/dev/null || true)"
+REVIEW_ID="$(jq -r '.id // empty' "$RESPONSE" 2>/dev/null || true)"
+if [ -n "$POSTED_AS" ] && [ "$POSTED_AS" != "$EXPECTED_USER" ]; then
+  echo "❌ REVIEW ALREADY POSTED, BUT AS THE WRONG ACCOUNT: $POSTED_AS (expected $EXPECTED_USER)." >&2
+  echo "   $REPO#$PR review id=$REVIEW_ID — it is live on GitHub; dismiss or delete it manually." >&2
+  exit 1
+fi
 
 if [ -n "$REVIEW_TOKEN" ]; then
-  echo "Posted PR review as $EXPECTED_USER (via PAT, no account switch)."
+  echo "Posted PR review as ${POSTED_AS:-$EXPECTED_USER} (via PAT, no account switch). review id=${REVIEW_ID:-?}"
 else
-  echo "Posted PR review as $EXPECTED_USER. Restoring default account $MAIN_USER..."
+  echo "Posted PR review as ${POSTED_AS:-$EXPECTED_USER}. review id=${REVIEW_ID:-?}  Restoring default account $MAIN_USER..."
 fi
