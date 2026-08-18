@@ -243,7 +243,11 @@ def sync_to_sqlite(prs, scope_repo=None):
         else:
             status, last_head, last_reviewed_at = row
             new_status = status
-            if status in ("approved", "changes_requested", "comment"):
+            # ⚠️ "comment" / "commented" 两种拼法都要认。同一列有三个写入方:
+            #    `review_watch.py` 的两个梯子写 "commented",这里原本只认 "comment"。
+            #    词表不一致的净结果是一条 COMMENT review 让 PR 永远出不了队
+            #    (dvt#239 实测连续三轮被重排),详见 review_watch.py 里那处 🔴。
+            if status in ("approved", "changes_requested", "comment", "commented"):
                 if cur_head and cur_head != last_head:
                     new_status = "needs_review"   # head moved → re-review
             elif status == "closed":
@@ -288,7 +292,8 @@ def build_queue(prs, max_prs, since_secs):
         reason = "new"
         if row:
             last_head, status = row
-            if status in ("approved", "changes_requested", "comment"):
+            # 同上:两种拼法都算已审完(见 :246 的说明)。
+            if status in ("approved", "changes_requested", "comment", "commented"):
                 cur = pr.get("headRefOid")  # inline from GraphQL — no extra gh call
                 if cur and cur == last_head:
                     continue

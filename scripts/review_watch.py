@@ -224,6 +224,16 @@ def upsert_pr(conn: sqlite3.Connection, pr: dict[str, object]) -> tuple[str, sql
         status = "approved"
     elif clestons_state == "CHANGES_REQUESTED":
         status = "changes_requested"
+    # 🔴 COMMENTED 也必须是终态,否则审完的 PR 会被**无限重排队**。
+    #    这个梯子原本只认 APPROVED / CHANGES_REQUESTED,于是一条 COMMENT review
+    #    落到开头那个默认的 "seen" 上;而 `poll_prs.build_queue` 只把
+    #    approved/changes_requested/comment* 当终态,"seen" 会以 reason="new" 重新入队。
+    #    净结果:在一个已经批准的 PR 上补发一条 COMMENT,它就永远排在队列里 ——
+    #    每轮巡检拾起、每轮发现无事可做(dvt#239 实测连续三轮)。而且手动把行改成
+    #    approved 也没用:这个 watcher 每 30s 就覆盖回去。
+    #    值取 "commented",和本文件下面那个 post-review 梯子(:415)保持一致。
+    elif clestons_state == "COMMENTED":
+        status = "commented"
 
     values = (
         repo,
