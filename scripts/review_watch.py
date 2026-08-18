@@ -946,6 +946,17 @@ def process_queue(conn: sqlite3.Connection, args: argparse.Namespace, current_re
         else:
             returncode = -1
             mark_reviewing(conn, row)
+            # Commit BEFORE the (synchronous, 15-25 min) review launch. Two reasons:
+            #   1. Lock: the UPDATE above opens an implicit write transaction that, without this
+            #      commit, stays open for the ENTIRE review — holding a RESERVED lock on the DB.
+            #      Every other writer (poll_prs.py --sync, start_loop_scope.py) then waits out its
+            #      busy_timeout=30s and dies with "database is locked". Observed 2026-08-18: the
+            #      cron patrol computed an EMPTY target list while this watcher was mid-review,
+            #      i.e. it silently reported "no pending PRs" instead of "I could not look".
+            #   2. Durability: status='reviewing' must be on disk before the long call, or a kill
+            #      mid-review rolls it back while current-review.json (written below) says a review
+            #      is in flight — the two disagree exactly when you need them to agree.
+            conn.commit()
             write_current_review(current_review, row, path)
             try:
                 returncode = launch_reviewer(row, path, False)
