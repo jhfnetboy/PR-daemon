@@ -23,7 +23,8 @@ import os
 import sys
 from datetime import datetime, timedelta
 
-# 每档的间隔(分钟)和该档要跑几次。最后一档跑完就停。
+# 每档的间隔(分钟),以及**空转几次**才升到下一档。最后一档空转满就停。
+# ⚠️ 第二列数的是「空转」次数,不是「运行」次数 —— 见 cmd_next 里的 🔴。
 LADDER: list[tuple[int, int]] = [
     (10, 3),
     (20, 3),
@@ -32,6 +33,9 @@ LADDER: list[tuple[int, int]] = [
     (50, 3),
     (60, 1),
 ]
+
+RUNGS = [m for m, _ in LADDER]
+QUIET_TO_ADVANCE = [q for _, q in LADDER]
 
 STATE_DIR = os.environ.get(
     "PR_DAEMON_STATE_DIR", "/Users/jason/Dev/tools/PR-Daemon/.state/pr-daemon"
@@ -86,23 +90,37 @@ def cmd_start(args: argparse.Namespace) -> int:
     state = {
         "started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "runs_done": 0,
+        "rung_idx": 0,
+        "quiet_at_rung": 0,
+        "consecutive_hits": 0,
         "trigger": args.trigger or "(未记录)",
     }
     _save(state)
     plan = _plan()
-    total_min = sum(plan)
     print(json.dumps({
         "action": "run_now",
         "runs_total": len(_runs()),             # 含立刻那次
         "ladder": [{"every_min": m, "times": t} for m, t in LADDER],
-        "total_span_min": total_min,
-        "note": "先立刻跑一次,之后按 ladder 排一次性 cron;最后一档跑完不再排 = 自动停",
+        "total_span_min_if_all_quiet": sum(plan),
+        "note": "先立刻跑一次;之后每轮按「有没有审到 PR」定档 —— 空转就爬,有活就贴。跨度只在【一路空转】时成立",
     }, ensure_ascii=False, indent=2))
     return 0
 
 
-def cmd_next(_args: argparse.Namespace) -> int:
-    """记一次「已跑完」,给出下一枚一次性 cron;梯子走完则 STOP。"""
+def cmd_next(args: argparse.Namespace) -> int:
+    """记一次「已跑完」,给出下一枚一次性 cron;梯子走完则 STOP。
+
+    🔴 **有活干就不许升档**(Jason 2026-08-19 追加):
+       · `--reviewed N`(N>0)= 这一轮真审了 PR。
+         - 连击第 1 次 → **保持当前档**,升档计数清零,而且**永不 stop**
+           (哪怕已经在 60 分钟档 —— 有活的时候停掉是最糟的时机)。
+         - 连击第 2 次及以后 → **每次降一档**(−10 分钟),下限 10 分钟。
+       · `--reviewed 0` = 空转。连击清零,该档空转数 +1;满了就升一档;
+         爬过最后一档才 stop。
+
+       「连击」按**连续**算 —— 中间空转一次就重新数。理由:这个梯子表达的是
+       「现在该多贴近」,而不是「历史上一共忙过几次」。
+    """
     state = _load()
     if state is None:
         print(json.dumps({
@@ -111,37 +129,66 @@ def cmd_next(_args: argparse.Namespace) -> int:
         }, ensure_ascii=False))
         return 2
 
-    plan = _plan()
-    done = int(state.get("runs_done", 0)) + 1
-    state["runs_done"] = done
+    reviewed = max(0, int(args.reviewed))
+    idx = int(state.get("rung_idx", 0))
+    quiet = int(state.get("quiet_at_rung", 0))
+    hits = int(state.get("consecutive_hits", 0))
+
+    state["runs_done"] = int(state.get("runs_done", 0)) + 1
     state["last_run_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    state["last_reviewed"] = reviewed
 
-    if done > len(plan):
-        state["stopped_at"] = state["last_run_at"]
-        _save(state)
-        print(json.dumps({
-            "action": "stop",
-            "runs_done": done,
-            "why": "梯子已走完(最后一档 60 分钟那次已经跑过)—— 不再排下一枚 cron",
-        }, ensure_ascii=False, indent=2))
-        return 0
+    if reviewed > 0:
+        hits += 1
+        quiet = 0                                   # 有活 → 升档计数作废
+        if hits >= 2:
+            before = idx
+            idx = max(0, idx - 1)                   # 连击第 2 次起,每次降一档
+            why = (f"连续第 {hits} 轮有活(本轮 {reviewed} 个 PR)—— "
+                   f"降档 {RUNGS[before]}→{RUNGS[idx]} 分钟"
+                   + ("(已到 10 分钟下限)" if idx == 0 and before == 0 else ""))
+        else:
+            why = f"本轮审了 {reviewed} 个 PR —— 保持 {RUNGS[idx]} 分钟档,不升档、不停止"
+    else:
+        hits = 0
+        quiet += 1
+        if quiet >= QUIET_TO_ADVANCE[idx]:
+            quiet = 0
+            idx += 1
+            if idx >= len(RUNGS):
+                state.update(rung_idx=len(RUNGS) - 1, quiet_at_rung=0,
+                             consecutive_hits=0,
+                             stopped_at=state["last_run_at"])
+                _save(state)
+                print(json.dumps({
+                    "action": "stop",
+                    "runs_done": state["runs_done"],
+                    "why": "最后一档(60 分钟)也空转满了 —— 不再排下一枚 cron",
+                }, ensure_ascii=False, indent=2))
+                return 0
+            why = f"空转,{RUNGS[idx - 1]} 分钟档已满 —— 升到 {RUNGS[idx]} 分钟"
+        else:
+            why = (f"空转 —— 保持 {RUNGS[idx]} 分钟档"
+                   f"({quiet}/{QUIET_TO_ADVANCE[idx]} 次后升档)")
 
-    wait = plan[done - 1]
+    wait = RUNGS[idx]
     when = datetime.now().astimezone() + timedelta(minutes=wait)
-    state["next_at"] = when.isoformat(timespec="seconds")
-    state["next_wait_min"] = wait
+    state.update(rung_idx=idx, quiet_at_rung=quiet, consecutive_hits=hits,
+                 next_at=when.isoformat(timespec="seconds"), next_wait_min=wait)
     _save(state)
 
-    remaining = plan[done - 1:]
     print(json.dumps({
         "action": "schedule",
-        "runs_done": done,
+        "runs_done": state["runs_done"],
+        "reviewed": reviewed,
+        "rung_min": wait,
         "wait_min": wait,
+        "consecutive_hits": hits,
+        "quiet_at_rung": quiet,
         "cron": _cron_for(when),
         "recurring": False,
         "fires_at": when.strftime("%Y-%m-%d %H:%M"),
-        "runs_left_after_this": len(remaining) - 1,
-        "why": f"第 {done} 次已跑完;当前档 {wait} 分钟",
+        "why": why,
     }, ensure_ascii=False, indent=2))
     return 0
 
@@ -152,10 +199,8 @@ def cmd_status(_args: argparse.Namespace) -> int:
         print(json.dumps({"active": False, "why": "没有 loop-ladder.json"},
                          ensure_ascii=False, indent=2))
         return 0
-    plan = _plan()
-    done = int(state.get("runs_done", 0))
-    state["active"] = "stopped_at" not in state and done <= len(plan)
-    state["runs_total"] = len(_runs())
+    state["active"] = "stopped_at" not in state
+    state["rung_min"] = RUNGS[int(state.get("rung_idx", 0))]
     print(json.dumps(state, ensure_ascii=False, indent=2))
     return 0
 
@@ -177,7 +222,10 @@ def main() -> int:
     p.add_argument("--trigger", help="触发词,只用于记录")
     p.set_defaults(func=cmd_start)
 
-    sub.add_parser("next", help="记一次已跑完,给出下一枚一次性 cron 或 STOP").set_defaults(func=cmd_next)
+    n = sub.add_parser("next", help="记一次已跑完,给出下一枚一次性 cron 或 STOP")
+    n.add_argument("--reviewed", type=int, default=0,
+                   help="这一轮真审了几个 PR(=巡检汇报里的 k)。>0 就不升档;连续 2 轮起降档")
+    n.set_defaults(func=cmd_next)
     sub.add_parser("status", help="当前进度").set_defaults(func=cmd_status)
     sub.add_parser("stop", help="手动停止梯子").set_defaults(func=cmd_stop)
 
