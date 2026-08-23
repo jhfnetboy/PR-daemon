@@ -284,10 +284,24 @@ def main() -> int:
                 return False
             return not (since and p.stat().st_mtime < since)
 
+        # ⚠️ 不能对整串做子串匹配。round_models 里常常**解释**某一轮为什么没跑
+        # （"R3=未跑(Codex 零挑战确认过错前提)"），子串匹配会把解释当成断言。
+        # 只看每个 `RN=` 赋值右侧的值本身。
+        def claims(round_tag: str, model: str) -> bool:
+            for seg in re.split(r"[;；]", row["round_models"] or ""):
+                if round_tag not in seg.lower().replace(" ", ""):
+                    continue
+                value = seg.split("=", 1)[1] if "=" in seg else seg
+                value = value.strip().lower()
+                if re.match(r"^(未跑|没跑|skipped?|n/?a|—|-|豁免)", value):
+                    return False
+                return value.startswith(model)
+            return False
+
         checks = [
-            ("R1a", "r1a" in claimed or "deepseek" in claimed, fresh(tmp / f"pr-{n}-r1a.md")),
-            ("R1b", "r1b" in claimed, fresh(tmp / f"pr-{n}-r1b.md")),
-            ("R3 codex", "codex" in claimed, fresh(out_file)),
+            ("R1a", claims("r1a", "deepseek"), fresh(tmp / f"pr-{n}-r1a.md")),
+            ("R1b", claims("r1b", "deepseek"), fresh(tmp / f"pr-{n}-r1b.md")),
+            ("R3 codex", claims("r3", "codex"), fresh(out_file)),
         ]
         if since is None:
             print("  ⚠️  未传 --since：无法区分本轮产物与上一轮残留，下面的核对只证明「文件存在」")
