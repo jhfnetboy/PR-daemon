@@ -375,7 +375,8 @@ Both R1a and R1b always go through `deepseek_review.py` (`--mode security` is im
 - comment / typo / formatting with NO behavioral change
 - does NOT touch `src/` `contracts/` `lib/` real logic
 - NO new public API / schema / migration
-- does NOT touch any automation-consumed file (see the 🔧 rule below)
+- does NOT change any automation-consumed **line** (see the 🔧 rule below — it is judged by the
+  changed lines, not by the file's name)
 
 **4-round (high risk) — ANY triggers it:**
 - type is feat / major refactor
@@ -384,10 +385,51 @@ Both R1a and R1b always go through `deepseek_review.py` (`--mode security` is im
 - concurrency / state machine / data persistence / DB migration
 - API contract / interface / schema change
 - deletes tests / disables security checks / cross-module sweep
-- 🔧 **automation-consumed files (NOT trivial even under `docs/`)**: CI workflows (`.github/workflows/*`),
-  `.pilot.yml`, task/plan ledgers (`docs/agent/tasks.md|roadmap.md|progress.md`), or any config/YAML/TOML
-  parsed & executed by CI / `pilot` / scripts. A bad value here has real consequences — a file being
-  Markdown or "docs" does NOT make it human-only prose.
+- 🔧 **automation-consumed LINES (NOT trivial even under `docs/`)** — judged by **the lines this PR
+  changed**, not by the file's name. A bad value in a line a machine parses has real consequences; a
+  file being Markdown or "docs" does NOT make it human-only prose. **But the converse is also true:
+  a narrative paragraph does not become machine-consumed by living in a file that has machine-read
+  lines elsewhere.** (Revised 2026-08-23, user-approved — see the note below for what it replaced.)
+
+  **4-round** when the changed lines are parsed or executed by CI / `pilot` / scripts:
+  - `.github/workflows/*`, `.pilot.yml`, any config / YAML / TOML / JSON a script reads
+  - the machine-read lines **inside** a ledger — e.g. `followups.md`'s `- [ ]` / `- [x]` checkbox
+    lines (`followups.sh count-open` counts exactly these), a status token a script greps for
+  - anything whose consumer you cannot name
+
+  **2-round** when the changed lines are narrative only:
+  - prose paragraphs of `progress.md` / `roadmap.md` / task descriptions — "what happened", "why",
+    "what's next"
+  - a status word (`BACKLOG`→`READY`, `PR_OPEN`→`DONE`) **whose backing you actually verified** —
+    the referenced PR is really MERGED (`gh pr view N --json state,mergedAt`) and the squash commit
+    really is what the ledger says. **Unverified status flips are NOT narrative** → 4-round.
+
+  🔬 **The mechanical test — do this instead of arguing about the category.** Name the consumer and
+  run it against **both sides** of the diff:
+  ```bash
+  git -C <wt-base> ... ; bash <consumer> <cmd>   # e.g. followups.sh count-open
+  git -C <wt-head> ... ; bash <consumer> <cmd>
+  ```
+  Machine-read output identical → the changed lines are narrative → **2-round**. Output differs, or
+  you cannot name a consumer → **4-round**. This is the same habit as #2 in "Five mechanical habits"
+  (`count-open` went 15 → 19 on CMIC#189) — here it doubles as the triage decision.
+
+  **The test was validated in both directions before this clause shipped** (a rule that only ever
+  answers "2-round" is worse than no rule — see habit #5 on suspecting your own apparatus):
+
+  | control | PR | changed lines | `count-open` base → head | verdict |
+  |---|---|---|---|---|
+  | positive | `blog#57` | flipped FU-16/FU-19 `- [ ]` → `- [x]` | **14 → 12, differs** | 4-round ✅ |
+  | negative | `blog#58` | prose + status words backed by merged PRs | **12 → 12, identical** | 2-round ✅ |
+
+  > **What this replaced, and how to roll it back.** Until 2026-08-23 this clause listed
+  > `docs/agent/tasks.md|roadmap.md|progress.md` **by filename**, so any touch of those files forced
+  > 4 rounds. Measured failure: `MushroomDAO/blog#58` — a pure ledger-sync PR (prose + status words
+  > already backed by merged PRs #54/#55/#56/#57) was triaged 4-round, while **both** of its blocking
+  > findings came from mechanical checks alone (grep the ledger; copy `searchVectorRanked` verbatim
+  > into node and run four failure scenarios; `count-open` on base vs head → 12/12, unchanged). Two
+  > Opus rounds would have bought nothing. Rollback = restore the filename list above; the old text is
+  > in `git log -S "automation-consumed files (NOT trivial"`.
 
 **Safety bias:**
 - 🔴 security-sensitive → force 4-round, DO NOT accept DeepSeek downgrade
@@ -396,6 +438,10 @@ Both R1a and R1b always go through `deepseek_review.py` (`--mode security` is im
   Opus/Codex backstop, and DeepSeek-flash is weakest exactly on judgement calls. When in doubt take the
   4-round path — the post-R2 severity gate below still SKIPS Codex if R2 finds nothing Medium+, so
   "config/docs with an Opus read" costs ~R1+R2, not a full 4 rounds.
+  - **Carve-out (2026-08-23):** a ledger/doc PR whose changed lines **passed the 🔧 mechanical test**
+    (consumer named, base-vs-head output identical) is NOT "uncertain" — it is measured. Take the
+    2-round path and say in the self-assessment **which consumer you ran and what both sides printed**.
+    "I eyeballed it and it looked like prose" does not clear this bar; an unrun consumer means 4-round.
 
 Record:
 ```bash
@@ -421,7 +467,8 @@ For a PR that only touches human-read prose (`*.md` docs, backlog task/doc bodie
 - "missing link / test evidence" objections against pure prose,
 - wording / style / consistency polish.
 
-A pure-docs PR should converge in **ONE round** unless it contains a substantive factual error. Rationale: cycling a prose PR through repeated REQUEST_CHANGES rounds for internal-precision nits costs far more (full reviewer + author round-trips, queue time) than the nit is worth — flag them once as suggestions and APPROVE. (This does NOT relax the bar for automation-consumed files under Step 4 — those are not "pure prose".)
+A pure-docs PR should converge in **ONE round** unless it contains a substantive factual error. Rationale: cycling a prose PR through repeated REQUEST_CHANGES rounds for internal-precision nits costs far more (full reviewer + author round-trips, queue time) than the nit is worth — flag them once as suggestions and APPROVE. (This does NOT relax the bar for automation-consumed **lines** under Step 4 — a changed line that a
+script parses is not "pure prose", even in a file whose other lines are.)
 
 > 🔴 **Before calling a prose claim FALSE, enumerate its readings — the ambiguity is in the sentence,
 > not in your evidence.** (Added 2026-08-07; this is the one habit in this file that is about
@@ -905,6 +952,8 @@ python3 /Users/jason/Dev/tools/PR-Daemon/scripts/triage_db.py report
 [ ] R1b: DeepSeek security-only → /tmp/pr-N-r1b.md  (parallel with R1a)
 [ ] Sonnet merged R1a+R1b → /tmp/pr-N-r1-merged.md (deduplicated)
 [ ] confirmed 2/4-round triage (security hard-rule → force 4; uncertain → escalate)
+[ ] if the PR touches a ledger/config/docs file: ran the 🔧 mechanical test (named the consumer,
+    ran it on base AND head) and recorded both outputs — did NOT triage it by the file's name
 [ ] recorded triage decision (triage_db.py)
 [ ] 2-round: Sonnet verdict directly
 [ ] 4-round: Opus R2 read diff independently + challenged R1 → /tmp/pr-N-r2.md
