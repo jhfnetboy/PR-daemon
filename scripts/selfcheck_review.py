@@ -89,10 +89,14 @@ def count_findings(path: Path) -> str:
         text = path.read_text(errors="replace")
     except OSError:
         return ""
-    findings = re.findall(r"^\s*\[(Critical|High|Medium|Low|Info)\]", text, re.M | re.I)
+    # 允许行首有列表记号（`- ` / `* ` / `1. ` / `F3 `）—— DeepSeek 两种模式的输出
+    # 形态不一样：R1a 直接 `[Low] file:line`，R1b 是 `1. [High] file:line`。
+    # 只认行首裸中括号会把 R1b 数成 0 条，而「0 条」读起来正好像「它判 clean」。
+    lead = r"^[ \t]*(?:[-*+]\s+|\d+[.)]\s+|F\d+\s+)?"
+    findings = re.findall(lead + r"\[(Critical|High|Medium|Low|Info)\]", text, re.M | re.I)
     notes = [f"{len(findings)} 条 finding"]
     # 退化形态①：同一条 finding 以两个严重度报两遍
-    bodies = re.findall(r"^\s*\[[A-Za-z]+\]\s*(.+)$", text, re.M)
+    bodies = re.findall(lead + r"\[[A-Za-z]+\]\s*(.+)$", text, re.M)
     trimmed = [b.strip()[:60] for b in bodies]
     if len(trimmed) != len(set(trimmed)):
         notes.append("⚠️ 有重复正文(同一条报了两个严重度?)")
