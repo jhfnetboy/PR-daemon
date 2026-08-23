@@ -260,14 +260,28 @@ def sync_to_sqlite(prs, scope_repo=None):
 
     # mark PRs that are tracked but no longer open as closed — scoped to the
     # repo(s) this sync actually covered, never the whole table (see docstring)
+    #
+    # ⚠️ `lower(state)` is load-bearing, not defensive tidying. TWO writers share
+    # this column with DIFFERENT casing: this file writes 'open' (:257), while
+    # `review_watch.py` writes/reads 'OPEN' (:849, :907). A case-sensitive
+    # `state='open'` silently excludes every row the watcher wrote, so those rows
+    # can NEVER become close-candidates — measured 2026-08-24: 46 fossils stuck at
+    # 'OPEN', the oldest merged 2026-08-04, still reading as open 20 days later.
+    # The queue itself was fine (build_queue works off the live gh fetch, not this
+    # table), so nothing was ever missed — the damage is that every DB-based
+    # question gets a wrong answer, which is exactly how this was found: a
+    # "head != last_reviewed_head" probe returned 6 merged PRs and read as
+    # "the queue is being suppressed".
     closed = 0
     if scope_repo:
         candidates = conn.execute(
-            "SELECT repo, pr_number FROM pr_watch_targets WHERE repo=? AND (state='open' OR state IS NULL)",
+            "SELECT repo, pr_number FROM pr_watch_targets "
+            "WHERE repo=? AND (lower(state)='open' OR state IS NULL)",
             (scope_repo,)).fetchall()
     else:
         candidates = conn.execute(
-            "SELECT repo, pr_number FROM pr_watch_targets WHERE state='open' OR state IS NULL").fetchall()
+            "SELECT repo, pr_number FROM pr_watch_targets "
+            "WHERE lower(state)='open' OR state IS NULL").fetchall()
     for r in candidates:
         if (r[0], r[1]) not in seen_keys:
             conn.execute("UPDATE pr_watch_targets SET state='closed', status='closed' WHERE repo=? AND pr_number=?", r)
