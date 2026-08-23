@@ -276,11 +276,21 @@ def main() -> int:
         claimed = (row["round_models"] or "").lower()
         print()
         print("── 交叉核对：台账声称 vs 产物证明")
+        # ⚠️ 交叉核对必须只认**本轮**的产物。/tmp 里上一轮留下的 pk-N-out.md 会让
+        # 「台账说跑了 Codex」和「磁盘上有 Codex 产物」对上，而这一轮根本没跑 ——
+        # 正是这个脚本要消灭的那种「看起来一致」。
+        def fresh(p: Path) -> bool:
+            if not p.is_file():
+                return False
+            return not (since and p.stat().st_mtime < since)
+
         checks = [
-            ("R1a", "r1a" in claimed or "deepseek" in claimed, r1_ran["r1a"]),
-            ("R1b", "r1b" in claimed, r1_ran["r1b"]),
-            ("R3 codex", "codex" in claimed, out_file.is_file()),
+            ("R1a", "r1a" in claimed or "deepseek" in claimed, fresh(tmp / f"pr-{n}-r1a.md")),
+            ("R1b", "r1b" in claimed, fresh(tmp / f"pr-{n}-r1b.md")),
+            ("R3 codex", "codex" in claimed, fresh(out_file)),
         ]
+        if since is None:
+            print("  ⚠️  未传 --since：无法区分本轮产物与上一轮残留，下面的核对只证明「文件存在」")
         for name, said, proved in checks:
             if said and not proved:
                 print(f"  {MISMATCH}  round_models 说跑了 {name}，磁盘上没有它的产物")
