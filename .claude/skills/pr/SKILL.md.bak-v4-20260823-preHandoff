@@ -721,98 +721,6 @@ Always use `post_pr_review.sh` (PAT mode, no account switching). Never `gh pr re
 
 > 全部通过 `mcp__seeder__*` 调用（MCP 与 DeepSeek endpoint 无关，照常可用）。任一 MCP 调用失败 → 记一行 warning，不阻塞 Step 7（review 结论已发到 GitHub，是权威）。
 
-## Step 6.6 — 跨会话交接：把结论直接投给原仓库自己的 Claude 会话（2026-08-23 用户指定）
-
-> 目的：review 完不止「写在 PR 上等人看见」，而是**直接把活派给那个仓库自己的会话** ——
-> 它在自己的目录里，有该仓库的 `CLAUDE.md` / 测试 / 全上下文，比 pr-daemon 在克隆目录盲修强。
->
-> 这条链和 Step 6.5 的 goutou 总线是**两回事，各跑各的**：
-> goutou 是**持久化 + 跨仓可见性**（会话死了任务还在，要 Seeder 活着）；
-> 这一条是**即时唤醒**，走 `ListAgents` + `SendMessage`，**不需要 Seeder、不需要 `.goutou.json`**。
-> 两条互不依赖，任一条失败都只记一行 warning，**不阻塞 Step 7**（GitHub 上的 review 才是权威）。
-
-### 6.6.1 找收件人 —— 只用 `ListAgents`，宁可不发也不许发错
-
-`ListAgents` 的**第一行是你自己的名字**（形如 `pr-daemon-fe`）。记下来 —— 下面要让对方回信到这个名字，
-**不要写死**，每个会话的名字都不一样。
-
-匹配规则（严格，不许模糊）：
-
-- 只考虑 `interactive` 且状态是 `idle` / `shell` 的**本机**会话。
-  `Remote Control · offline` 的那些**收不到消息**，直接跳过，不要往那儿发。
-- 会话名形如 `<repo-slug>-<后缀>`（`blog-3d` / `aastar-sdk-f1` / `colivingos-7a`）。
-  取 `OWNER/REPO` 的 `REPO` 小写，与会话名**去掉末尾 `-<后缀>` 之后的部分做全等比较**。
-- 命中恰好 1 个 → 发。
-- 命中 0 个 → **不发**，Step 8 汇报里写一行「`<repo>` 无在跑会话，未投递」，并告诉用户
-  起一个就能收：`cd <repo 路径> && claude`。
-- 命中 ≥2 个 → **不发**，把候选连同各自的 `[ref]` 列出来交给用户挑。
-
-> ⛔ **绝不靠「看起来像」「前缀包含」去匹配。** 把 A 仓的 findings 投进 B 仓的会话，比不发严重得多 ——
-> 对方会照着去改一个跟它无关的仓库。已知易撞：`cos72` 的 `.goutou.json` 里 `repoId` 写的是 `yaaa`；
-> `airaccount-contract` 和 `AirAccount`(=kms) 是两个不同仓库；`MediaBot` 在 `~/Dev/tools/` 不在 `~/Dev/auraai/`。
-> 拿不准一律按「命中 0 个」处理。
-
-### 6.6.2 什么时候发
-
-| verdict | 动作 |
-|---|---|
-| `REQUEST_CHANGES` | **发**，内容见 6.6.3，并要求回信 |
-| `APPROVE`，且本 PR **之前被我 RC 过** | **发一条收尾**：告诉它已通过、本轮不用再改、**不要合并** |
-| `APPROVE`，且是首轮就过 | 不发（没有要协同的事，省噪音） |
-
-bot PR（dependabot / renovate）→ 跳过本步，走 `$pr-fix` 内部闭环。
-
-### 6.6.3 消息内容契约
-
-`SendMessage({to: "<会话名>", summary: "<repo>#<N> <verdict>", message: ..., notify_when_idle: true})`
-
-`notify_when_idle: true` 是关键：它让你在**对方下一次转为 idle（或退出）时收到一次通知**，
-不用轮询、也不用发「你好了吗」。**禁止用 `ListAgents` 轮询等回复。**
-
-正文必须包含，缺一不可：
-
-1. **你是谁 + 回信地址** —— 「来自 PR-Daemon（会话名 `<你自己的名字>`，回信直接用这个名字）」
-2. **PR 全名 + 结论 + 当前 head sha** —— 让它能自己核对是不是最新
-3. **阻塞项逐条**，格式 `[Sev] file:line — 问题 | 处方`。
-   处方遵守本文件既有的铁律：**要么写出确切那一行，要么只描述缺陷并明说「不开处方」**，不许写半吊子
-4. **已经验过没问题的部分**（附实测命令与结果）—— 免得它去重修我已经确认对的东西
-5. **明确的回信要求**（原话照抄这段语义）：
-   > 改完后请 `SendMessage` 回 `<你自己的名字>`，一句话说清：**改了哪几条、跳过哪几条及理由、新的 head sha**。
-   > 如果你认为我某条判断是错的，**直接说并附上你的实测**——上一轮就发生过我错、作者对的情况。
-6. **不要合并** —— 见 6.6.5
-
-### 6.6.4 收到回信之后：重审，直到 APPROVE
-
-对方回信（或 `notify_when_idle` 通知到了）之后：
-
-1. **先核 head sha**：`gh pr view N --repo OWNER/REPO --json headRefOid`。
-   sha 没变 = 它还没推，或者只是回了句话 —— 不要开始重审，回一条问清楚。
-2. sha 变了 → 走**增量复审**：Step 0b（rebase 短路）、Step 0c（拉回上一轮结论）都照常，
-   **判断的对象是「我上一轮那几条修干净没有」，不是重新全量 review**。
-3. ⚠️ **用发现 bug 的那个工具去验修复**（本文件既有铁律）。读新代码觉得合理 **不算** 验证 ——
-   上一轮的代码当时看着也合理。判据改过的话，**上一轮的变异结论不继承，必须重跑**。
-4. 出新 verdict → 回到 Step 6 发 GitHub review → 再回 6.6：
-   - 还是 `REQUEST_CHANGES` → 再发一轮（消息里带上「第 N 轮」和「上一轮哪几条没收干净」）
-   - `APPROVE` → 发 6.6.2 那条收尾消息，**本 PR 的交接链到此结束**
-
-**循环终点是 APPROVE，不是 merged。** 见下。
-
-### 6.6.5 ⛔ 终点是 APPROVE —— 不许让对方合并（HARD）
-
-用户曾要求「一直循环到 PR 被合并发布为止」。**这一条不能照做，理由是硬的**：
-
-- 本 skill 的 ABSOLUTE CONSTRAINT #1：pure reviewer，**NEVER merge**，任何作者的 PR 都不合。
-- `SendMessage` 的权限边界规则：**绝不能让 peer 去做你自己被禁止/被拦下的动作** ——
-  peer 替你做，等于绕过用户对你设的权限决定（cross-session permission laundering）。
-  「我不合，但我叫另一个会话去合」正是这条禁止的形态。
-
-所以：
-
-- 消息里**必须**写明「不要合并 —— 合并是 Jason 的决定」。
-- APPROVE 之后**不再排下一轮**，改为**向用户报告**：`OWNER/REPO#N 已 APPROVE，可以合了`（一行）。
-- 用户如果明确说「你去让它合 / 你来合」，那是他当场的授权，届时再照办；
-  **不要把它写进自动链路**。
-
 ## Step 7 — Score + record
 
 ```bash
@@ -864,7 +772,6 @@ Print after every PR:
    R2(Opus): Y independent findings, Z R1 rejected
    R3(Codex): [ran|skipped] — W challenges
    R4(Opus): final verdict
-   交接: 投给 <会话名> ✅ / 无在跑会话 —— 未投递 / 命中多个 —— 待用户指定
 📊 PR status: open N, reviewed M [changes: X, approve: Y]
 💰 this PR ~Nk tok | cumulative $X.XX
 ```
@@ -1059,13 +966,11 @@ python3 /Users/jason/Dev/tools/PR-Daemon/scripts/triage_db.py report
 [ ] scored DeepSeek R1a+R1b separately in model_eval_db
 [ ] printed per-PR v4 eval delta (R1 confirmation rate, Opus R2 independent findings)
 [ ] updated pr_watch_targets in SQLite
-[ ] Step 6.6: ListAgents 找原仓库会话 → 命中 1 个才发；发了要带回信地址+回信要求+「不要合并」；没命中就在汇报里写明
 ```
 
 ## Hard Rules
 
 - **NEVER MERGE.** Pure reviewer — APPROVE or REQUEST_CHANGES only. `$pr-fix` handles merging.
-- **也不许让别的会话替你合**（Step 6.6.5）——「我不合但我叫它合」是 permission laundering，同样禁止。交接链的终点是 APPROVE。
 - **Sonnet is executor only** — no judgment on 4-round PRs. Sonnet formats, runs scripts, merges lists.
 - **Opus makes the 4-round final call** — Sonnet does NOT override or second-guess Opus's verdict.
 - **Codex PK targets Opus R2 findings** (not DeepSeek R1 findings) — challenge the best analysis.
