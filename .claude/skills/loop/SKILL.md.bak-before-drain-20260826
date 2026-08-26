@@ -65,32 +65,13 @@ python3 scripts/loop_ladder.py start --trigger "<原话>"
 3. 对每个目标仓库,`Skill(skill="pr", args="<OWNER/REPO>")`,跑它未经修改的 Steps 0-8;
    队列空就 RETURN,**不要**用它 Step 8 那个 `sleep 300` 内层等待
 4. 每 post 完一个 PR 的结论就 `touch "$LOCK"` 刷新
-5. **⛔ 排空,不是跑一趟就走(Jason 2026-08-26)**
-   审完一遍之后**再跑一次** `start_loop_scope.py targets`,并对每个目标 PR 比对
-   `pr_watch_targets.last_reviewed_head_oid` 和当前 head:
-
-   - **还有 head 不同的 PR** → **立刻接着审,不排 cron、不进 Step 3。**
-     手上有活还去等 10 分钟,是把「等待」当成了目的。回到本步第 3 点。
-   - **一个都不剩了** → 才进 Step 3 开始计时。
-
-   为什么要重新扫而不是用第 2 点那份名单:审的过程中对方会推新 commit、开新 PR、
-   把我 REQUEST_CHANGES 的那条改完再来 —— 这些恰恰是**最该马上接着看**的,
-   而第 2 点那份名单已经过期了。**每一轮排空前的最后一次扫描必须是新的。**
-
-   ⚠️ 排空不设次数上限,但**每轮结束都刷新 `$LOCK`**,让「距上次有进展多久」保持真实。
-   一直有新活就一直干 —— 那不是失控,那正是要的行为;真正该停的信号是**扫描扫空**。
-
-6. 一行汇报:`本轮: kms 193 ❌RC · sdk 328 ✅ — 细节见各 PR comment`;没活干就 `本轮: 无待审 PR`
-7. `rm -f "$LOCK"`
+5. 一行汇报:`本轮: kms 193 ❌RC · sdk 328 ✅ — 细节见各 PR comment`;没活干就 `本轮: 无待审 PR`
+6. `rm -f "$LOCK"`
 
 ⛔ 仓库名**只能**来自 Step 2 那条命令的 stdout,不许写死在这个文件里 ——
 写死的名单永远比来源先过期。
 
 ## Step 3 — 排下一枚,或者停
-
-⛔ **只有 Step 2 第 5 点扫空之后才走到这里。** 队列里还有没审的 PR 就回 Step 2,
-梯子管的是「闲下来之后多久再看一眼」,不是「干活干到一半歇一会儿」。
-
 
 ```bash
 python3 scripts/loop_ladder.py next --reviewed <k>     # k = 本轮真 post 了结论的 PR 数
@@ -114,11 +95,8 @@ cd /Users/jason/Dev/tools/PR-Daemon
 export PR_DAEMON_STATE_DIR=/Users/jason/Dev/tools/PR-Daemon/.state/pr-daemon
 
 按 `.claude/skills/loop/SKILL.md` 的 Step 2 跑一次巡检(锁 → start_loop_scope.py targets
-→ 逐个仓库交给未经修改的 pr skill → **重新扫描,还有 head 不同的 PR 就接着审,
-排空为止** → 一行汇报 → 解锁),记下本轮真 post 了结论的 PR 数 k,然后执行 Step 3:
-
-⛔ **有活就不许排 cron。** 扫描扫空才是进 Step 3 的唯一条件;手上还有待审 PR
-却去等下一枚 cron,是把「等待」当成了目的。(Jason 2026-08-26)
+→ 逐个仓库交给未经修改的 pr skill → 一行汇报 → 解锁),记下本轮真 post 了结论的 PR 数 k,
+然后执行 Step 3:
 
   python3 scripts/loop_ladder.py next --reviewed <k>
 
