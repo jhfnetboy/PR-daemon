@@ -97,9 +97,18 @@ one to tell the user about.
 > ⛔ **ABSOLUTE CONSTRAINT #5 — DeepSeek R1a runs by default; exactly TWO structural exemptions**
 > (这条从「绝不可跳过」收敛成「两条结构性豁免」的由来：见 `references/incidents.md#constraint5-history`。)
 >
-> 这两条豁免是 170 轮记录得出的，证据与它命中过哪几条：见 `references/incidents.md#r1-170-round-record`。
+> **Run R1a on every round EXCEPT these two, where 0/N is structural rather than unlucky:**
+> 1. **Pure-docs / ledger PRs** — on a long document it has fabricated every `file:line` anchor it emitted.
+> 2. **Incremental rounds whose increment is fixes to YOUR OWN prior findings** — the findings are
+>    already known and written down, so there is nothing left for it to independently find.
+>
+> Everywhere else — new PR, real code diff, any increment that adds new logic — **run it**. "I can do
+> a good review without it" is still NOT a valid reason to skip: on a real code diff its hit rate is
 > low but non-zero, and the cost is one parallel call. Skipping it *there* has burned us before
 > (AirAccount#191 re-review).
+>
+> (这两条豁免是 170 轮记录得出的；它命中过哪几条、两条豁免各自的实测数据：见
+> `references/incidents.md#r1-170-round-record`。)
 > After R1a returns, verify each of its findings against the actual code/diff yourself (don't just
 > trust it) and append ONE explicit line to the self-assessment (Step 8): a 1-5 rating of DeepSeek
 > v4-flash's performance THIS round + one sentence why (findings that held up under verification /
@@ -549,7 +558,7 @@ Codex challenges Opus R2's Medium+ findings (not R1 findings directly).
 >
 > ⏱️ **Pass an explicit Bash `timeout` of at least 480000 ms on that call.** `codex_pk.sh`'s own
 > hard cap is `CODEX_MAX_SECS=360` plus stall detection, but the **Bash tool defaults to 120 s** —
-> so the documented invocation is killed at 2 minutes *every time* unless you override it. What
+> so the documented invocation is killed at 2 minutes *every time* unless you override it.
 > 它值得单开一条而不是脚注，是因为**失败的形状**:`exit 143`、无输出文件、stderr 也空 —— 与「Codex 挂了」无法区分，
 > 而下一步的自然反应是回落到 DeepSeek，**在 Codex 明明好用的那一轮悄悄降级了 R3**。实例与善后核查:见 `references/incidents.md#codex-timeout-shape`。
 
@@ -655,8 +664,10 @@ R3: <Codex output compact, or "SKIPPED">
 
 > ⛔ **一个 PR 的「完成」= post + 投递（Step 6.6），不是 post。**（Jason 2026-08-27，当场发火）
 >
-> 这条闸门是怎么买来的：见 `references/incidents.md#deliver-gate-incident`。
-> 写着「一个『有时候不发』的规则，执行起来就会变成『经常忘了发』」，而我把它降级成了「有空再发」。
+> **发生过什么:** post + 入库完就跳去下一个 PR 的判断轮，Step 6.6 一个字没做。给自己的解释是
+> 「6.6 排在 Step 6/7 之后，看着像收尾杂项，而下一个 PR 已经预备好在等」——**这个解释本身就是 bug 的形状**：
+> 6.6.2 那段注释早就写着「一个『有时候不发』的规则，执行起来就会变成『经常忘了发』」，而我把它降级成了「有空再发」。
+> 完整事故经过：见 `references/incidents.md#deliver-gate-incident`。
 >
 > **所以规则改成这样，不留判断余地：**
 > 1. `post_pr_review.sh` 返回之后，**下一个动作只能是 `ListAgents`**。不许先 record-run、不许先
