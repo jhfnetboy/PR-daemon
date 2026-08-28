@@ -226,23 +226,6 @@ increment vs. the last-reviewed head is NOT empty in that case — it contains t
 code — so the diff size alone will not tell you. A tell: **R1's findings all point at files the PR
 does not own** (it diffed a pre-rebase base). Treat that as corroboration, not as findings.
 
-### Step 0b-2 — 兄弟 PR 合并之后回来的那一棵树，谁都没审过（added 2026-08-28）
-
-Step 0b 处理的是「head 动了但没有新活」。**这一条相反：head 动了，而且动的正是没人审过的部分。**
-
-几个**同 base** 的 PR 各自 APPROVE、其中一个先合之后，剩下那个 rebase/merge 回来的是**一棵新树**。
-逐个审过 ≠ 合起来是对的，而这棵树上的判断题**只在解冲突的那几个文件里**。
-
-1. 先做逐文件增量表（Step 0b 那条命令，比 `<上次审的 head>..<新 head>`）。0 行的文件不用重看；
-   **非 0 的那几个就是解冲突真正动过的地方，那才是本轮要审的东西。**
-2. **重点核「被兄弟 PR 删掉的符号有没有复活」** —— 整边取 theirs 会把它们带回来。直接 grep 计数，
-   例如 `grep -c "force-dynamic\|getDb\|AvailabilityService" src/app/[locale]/page.tsx` 应为 0。
-3. **整树重跑** check:* / tsc / lint / vitest / build，并核产物（兄弟 PR 的改进有没有被回滚）。
-4. **把各 PR 各自的 e2e 放在一起跑一次** —— 「几个特性互不干扰」这件事**分开验证不出来**。
-
-（CoLivingOS #236/#237/#238：#238 的分支还停在旧 `page.tsx`，整边取 theirs 会复活 #236 删掉的
-`force-dynamic` 和整段 D1 聚合。三个 e2e 合在一棵树上跑的 4 passed 是唯一能证明互不干扰的证据。）
-
 ### Step 0c — Recall: pull back what a previous round already knew (added 2026-08-07)
 
 A review session is **not** guaranteed to be the same conversation that reviewed this PR last time —
@@ -519,18 +502,6 @@ script parses is not "pure prose", even in a file whose other lines are.)
 Go to Step 6.
 
 ## Step 5b — 4-round path (high risk)
-
-### ⛔ 子代理纪律（两条，2026-08-28 当天各踩一次）
-
-**① 它可能跑完转 idle 却永远不回传结果。** 所以：prompt 里写明 **HARD BUDGET（N 分钟内只回模板）**，
-并把**已经实测到的事实 inline 塞进去**、明说「不要重跑 build / 测试」。超时 → `SendMessage` 催**一次**
-（把已 settle 的问题一并告诉它别再推导）→ 还不回就**重开一个**或**自己把它那份判断做完**。
-**但必须在 review 里如实标明哪一轮没跑，绝不凑轮数。** 等待用可中断的方式，别把整轮堵死在一次同步等待里。
-（#236：第一个 R2 转 idle 但无结果、R4 催两次没回，整轮 52 分钟大半在等。）
-
-**② 别和它共用存放构建产物的 worktree。** 子代理会在你的树里跑 `next build`；e2e 的 dev server
-同样会覆盖 `.next`。产物是易失证据：**给子代理的树和自己存产物的树分开，同一棵树上 build 与 e2e 不同序，
-产物当场解析当场记数。** 失败表现是 `FileNotFoundError`，很容易误以为自己路径写错。
 
 ### R2 — Opus independent strategic review
 
@@ -859,9 +830,6 @@ bot PR（dependabot / renovate）→ 跳过本步，走 `$pr-fix` 内部闭环�
 
 1. **先核 head sha**：`gh pr view N --repo OWNER/REPO --json headRefOid`。
    sha 没变 = 它还没推，或者只是回了句话 —— 不要开始重审，回一条问清楚。
-   ⛔ **回信里给的 sha 一律不采信，自己从 API 现读；对方报的任何数字（键数、告警数、张数）
-   引用前也自己跑一遍。** 不是不信任，是这一步经常救命：CoLivingOS#238 那次对方给的 sha 是对的，
-   **但正是这次现读才发现他在发信之后又推了一个 commit** —— 采信那封信就会「审了一棵、批了另一棵」。
 2. sha 变了 → 走**增量复审**：Step 0b（rebase 短路）、Step 0c（拉回上一轮结论）都照常，
    **判断的对象是「我上一轮那几条修干净没有」，不是重新全量 review**。
 3. ⚠️ **用发现 bug 的那个工具去验修复**（本文件既有铁律）。读新代码觉得合理 **不算** 验证 ——
@@ -1042,7 +1010,7 @@ For security-sensitive PRs, **run the tooling — don't reason from reading**. D
 All five are cheap, all five caught (or would have caught) something the same night. Run them as
 steps, not as things to remember.
 
-1. **核 head 要核三次：`git worktree add` 之后、`post_pr_review.sh` 之前、post 之后核 `review.commit_id`。** They can
+1. **核 head 要核两次：`git worktree add` 之后一次，`post_pr_review.sh` 之前一次。** They can
    differ — a force-push between the two calls is normal.
    ⚠️ **只核第一次是不够的，这是 2026-08-27 用实际事故买来的。** 评审窗口有 20-60 分钟；
    `CoLivingOS#213` 的 force-push 恰好落在我 `gh pr view`(04:13:15Z) 和 post(04:30:37Z) 之间，
