@@ -51,11 +51,7 @@ through `scripts/scan_scope.py` — `poll_prs.py`, `poll_fix_queue.py`, `review_
 `$pr add`, which writes it AND regenerates `repos.conf`). **Never hand-edit `repos.conf`** —
 its own header says so and `refresh-scan-focus.sh` overwrites it.
 
-What this replaced, so nobody rebuilds it: scope used to have *three* disagreeing sources —
-a hardcoded `ORGS = [...]` copied into four scripts (the list that actually ran), a
-`start-loop-pinned.json` read only by `start_loop_scope.py`, and `repos.conf` read only by
-`review_watch.py`, **which is not running** — so pinning a repo there changed nothing.
-`$start` is now an alias for `$pr start`; there is no second entry point.
+> 这条规则替换掉了什么(三个互相矛盾的 scope 来源)：见 `references/incidents.md#scope-three-sources`。
 
 `scan_scope.orgs()` (swept wholesale) comes from `candidate-orgs.conf`, NOT from the owners
 in `repos.conf` — otherwise listing `jhfnetboy/CMIC` would sweep all of that account's
@@ -74,6 +70,11 @@ prompt contains `[[start-loop]]` → `CronDelete` it.
 That file is implementation detail for this subcommand, not a second entry point. `$start`
 still resolves to it for muscle memory, but **`$pr start` is the documented command** and the
 one to tell the user about.
+
+> 📁 **事故档案在 `references/incidents.md`。** 这份文件只留**可执行的规程**;每条规则是哪次事故买来的、
+> 当时测到了什么、它替换掉了什么、怎么回滚,都在那里,由正文里的 `references/incidents.md#<锚>` 指过去。
+> **规则一字未动,只是搬了家**(2026-08-28 重构;`SKILL.md.bak-before-placement-20260828` 是重构前的全文)。
+> 执行时不需要读档案;要判断「这条规则还成不成立 / 能不能改」时再去读。
 
 > ⛔ **ABSOLUTE CONSTRAINT #1 — Review only, NEVER merge**
 > Pure reviewer. NEVER merge any PR regardless of author (human or bot).
@@ -94,26 +95,9 @@ one to tell the user about.
 > hundreds); the include-list is the allowlist. Never review a personal PR that is not on that list.
 >
 > ⛔ **ABSOLUTE CONSTRAINT #5 — DeepSeek R1a runs by default; exactly TWO structural exemptions**
-> (originally 2026-08-01 "never optional"; **the record it demanded is now complete — 170 rounds over
-> 80 PRs by 2026-08-08, 8.5× its own 20-round target — so the decision it was collecting for is made,
-> and the blanket rule is replaced by the conclusion.** Same shape as the v4-vs-v3 eval section deleted
-> the same day: an expired decision point that kept costing a round.)
+> (这条从「绝不可跳过」收敛成「两条结构性豁免」的由来：见 `references/incidents.md#constraint5-history`。)
 >
-> **The conclusion, from the 170-round record:** keep flash, but its job is **cheap hypothesis
-> generation on real code diffs**, not being a findings source. It has genuinely hit — `#190`'s two
-> Highs (non-idempotent ALTER; `page_html` missing `assertNoCommercial`), the pii-probe sweep deleting
-> a concurrent sibling's live file, the `/isn.t supported/i` dot — and once it was *wrong but pointed
-> the right way*, and following it up found the real bug. That is worth its ~40 seconds.
->
-> **Run R1a on every round EXCEPT these two, where 0/N is structural rather than unlucky:**
-> 1. **Pure-docs / ledger PRs** — measured 0/12 then, still 0/N now; on a long document it has
->    fabricated every `file:line` anchor it emitted.
-> 2. **Incremental rounds whose increment is fixes to YOUR OWN prior findings** — the findings are
->    already known and written down, so there is nothing left for it to independently find. (Measured
->    repeatedly on `CMIC#190`/`#194`/`#196`/`#197`: `--prior-review` made it *worse*, not better.)
->
-> Everywhere else — new PR, real code diff, any increment that adds new logic — **run it**. "I can do
-> a good review without it" is still NOT a valid reason to skip: on a real code diff its hit rate is
+> 这两条豁免是 170 轮记录得出的，证据与它命中过哪几条：见 `references/incidents.md#r1-170-round-record`。
 > low but non-zero, and the cost is one parallel call. Skipping it *there* has burned us before
 > (AirAccount#191 re-review).
 > After R1a returns, verify each of its findings against the actual code/diff yourself (don't just
@@ -220,11 +204,8 @@ constraint #5), then **restate the previous verdict and STOP — do not run R2/R
 the review that the head moved by rebase, list the per-file 0-diff evidence, and confirm the prior
 blockers are byte-identical.
 
-Why this is worth a rule: on CoLivingOS/CMIC#165 a rebase re-queued the PR and a full 4-round pass
-would have spent three judgement rounds re-deriving conclusions that could not have changed. The
-increment vs. the last-reviewed head is NOT empty in that case — it contains the merged sibling's
-code — so the diff size alone will not tell you. A tell: **R1's findings all point at files the PR
-does not own** (it diffed a pre-rebase base). Treat that as corroboration, not as findings.
+一个**认出它的迹象**：R1 的 findings 全指向这个 PR 并不拥有的文件(它 diff 的是 rebase 前的 base)—— 那是佐证，不是 findings。
+为什么值得单开一条规则：见 `references/incidents.md#rebase-short-circuit-why`。
 
 ### Step 0b-2 — 兄弟 PR 合并之后回来的那一棵树，谁都没审过（added 2026-08-28）
 
@@ -274,11 +255,7 @@ sqlite3 "$DB" "SELECT '· '||repo||'#'||pr_number||'  '||summary
 `prior-context` emits `score=N.N` and nothing else. They look like the right tool and silently give
 you nothing. Read the column directly.
 
-**Why ① is not optional on an incremental round:** the fix commit's message tells you what the author
-*believes* he fixed. Only the previous review tells you what was actually blocking, and **in what
-words** — so you can re-run *the same probe that found it* instead of inventing a new one. On
-CoLivingOS#74 that is exactly what settled it: the mutation that was green last round went red this
-round, and that comparison is only possible if you still have last round's mutation.
+**① 在增量轮不是可选的**：fix commit 的 message 说的是作者**以为**他修了什么；只有上一轮的 review 才说得清当时到底卡在哪、**用的什么词** —— 你才能**重跑当初找到它的那个探针**，而不是另发明一个。理由实例：见 `references/incidents.md#recall-prior-verdict-why`。
 
 ⚠️ **Judge the fix with the tool that found the bug.** Reading the new code and finding it plausible
 is not verification — the previous round's code also looked plausible.
@@ -431,22 +408,7 @@ Both R1a and R1b always go through `deepseek_review.py` (`--mode security` is im
   you cannot name a consumer → **4-round**. This is the same habit as #2 in "Five mechanical habits"
   (`count-open` went 15 → 19 on CMIC#189) — here it doubles as the triage decision.
 
-  **The test was validated in both directions before this clause shipped** (a rule that only ever
-  answers "2-round" is worse than no rule — see habit #5 on suspecting your own apparatus):
-
-  | control | PR | changed lines | `count-open` base → head | verdict |
-  |---|---|---|---|---|
-  | positive | `blog#57` | flipped FU-16/FU-19 `- [ ]` → `- [x]` | **14 → 12, differs** | 4-round ✅ |
-  | negative | `blog#58` | prose + status words backed by merged PRs | **12 → 12, identical** | 2-round ✅ |
-
-  > **What this replaced, and how to roll it back.** Until 2026-08-23 this clause listed
-  > `docs/agent/tasks.md|roadmap.md|progress.md` **by filename**, so any touch of those files forced
-  > 4 rounds. Measured failure: `MushroomDAO/blog#58` — a pure ledger-sync PR (prose + status words
-  > already backed by merged PRs #54/#55/#56/#57) was triaged 4-round, while **both** of its blocking
-  > findings came from mechanical checks alone (grep the ledger; copy `searchVectorRanked` verbatim
-  > into node and run four failure scenarios; `count-open` on base vs head → 12/12, unchanged). Two
-  > Opus rounds would have bought nothing. Rollback = restore the filename list above; the old text is
-  > in `git log -S "automation-consumed files (NOT trivial"`.
+  > 这条 🔧 机械判据的双向验证(正/负对照)与它替换掉的按文件名清单、回滚方式：见 `references/incidents.md#triage-mechanical-test`。
 
 **Safety bias:**
 - 🔴 security-sensitive → force 4-round, DO NOT accept DeepSeek downgrade
@@ -500,12 +462,7 @@ script parses is not "pure prose", even in a file whose other lines are.)
 > The step: write down the claim, list every mechanism it could plausibly name, and check the
 > cheapest one you have NOT yet checked before you write "contradicted by the repo's own state".
 >
-> *(CMIC#189, FU-20's 「而不是只保护 main」. I queried as repo owner: `branches/main` →
-> `protected: false`, `preview` likewise, owner `.type == "User"` so no org ruleset, `/protection`
-> and `/rulesets` both 403. Airtight — for the GitHub-branch-protection reading. R3 Codex then
-> pointed at `.github/workflows/ci.yml`: `on: push: branches: [main]` + `on: pull_request`, so a
-> direct push to `preview` runs NO CI while a push to `main` does. The mechanical asymmetry is real
-> and the sentence is literally true under that reading. My finding died; the author was right.)*
+> 这条是怎么买来的(我有铁证却读错了句子)：见 `references/incidents.md#prose-two-readings`。
 >
 > Two corollaries worth taking:
 > - **Feed R3 the natural-language claim, not just your verdict on it.** Codex only caught this
@@ -593,21 +550,13 @@ Codex challenges Opus R2's Medium+ findings (not R1 findings directly).
 > ⏱️ **Pass an explicit Bash `timeout` of at least 480000 ms on that call.** `codex_pk.sh`'s own
 > hard cap is `CODEX_MAX_SECS=360` plus stall detection, but the **Bash tool defaults to 120 s** —
 > so the documented invocation is killed at 2 minutes *every time* unless you override it. What
-> makes this worth a rule rather than a footnote is the failure's SHAPE: `exit 143`, no output
-> file, nothing on stderr. That is indistinguishable from "Codex is down", and the natural next
-> move is to fall back to DeepSeek — silently downgrading R3 on a run where Codex was working
-> fine. (CMIC#189: killed at 120 s, re-run with `timeout: 480000` returned a clean 4/4 in ~5 min
-> and CHALLENGED the round's strongest finding. Falling back would have lost that.)
-> The outer kill leaves no orphan and does not trip the circuit breaker — verified after the fact
-> with `pgrep -fl "codex exec"` and by reading `codex-breaker.json` — so the only cost is the
-> wasted attempt, provided you do not misread it as an outage.
+> 它值得单开一条而不是脚注，是因为**失败的形状**:`exit 143`、无输出文件、stderr 也空 —— 与「Codex 挂了」无法区分，
+> 而下一步的自然反应是回落到 DeepSeek，**在 Codex 明明好用的那一轮悄悄降级了 R3**。实例与善后核查:见 `references/incidents.md#codex-timeout-shape`。
 
 > 🔴 **Codex's sandbox is READ-ONLY and OFFLINE. Never put a command in its self-check that needs
 > either.** (Added 2026-08-07 after burning two consecutive R3 rounds.)
 >
-> `npx` / `pnpm` / `tsx` / `pip` all fail there — `npx` tries the registry and dies with
-> `ENOTFOUND`. Both times Codex behaved correctly: the prompt said 「不对就说出来并停下」 and it
-> stopped. The fault was mine, twice.
+> `npx` / `pnpm` / `tsx` / `pip` 在那里全都跑不了(`npx` 会去连 registry 然后 `ENOTFOUND`)。两次都是 Codex 表现正确、错在我。实例:见 `references/incidents.md#codex-sandbox-offline`。
 >
 > - **Self-check commands: `grep` / `sed` / `cat` ONLY.** Two greps that must hit are enough to
 >   prove it is looking at the right tree.
@@ -654,12 +603,7 @@ Second Opus call. Gets full diff + all round context. Two jobs in one call.
 > if the counter holds the finding collapses. This is the single highest-value line in the R4 prompt
 > — measured four times in one session, and it moved severity in BOTH directions:
 >
-> | PR | What R4 was told to attack | Result |
-> |---|---|---|
-> | CMIC#165 | 「my composite box is a flat rectangle; a real box has shadows/reflections so it may carry far more energy」 | **Refuted the counter** (real box = 11.2% of pixels, 15.6% of edge energy) and then found the decisive fact nobody had: the positive control was invalid |
-> | CMIC#166 | 「how likely is a client-chosen id to match a phone pattern in practice?」 | **Downgraded** the finding: 200k samples of the real generator, 0 redactions — and redirected it to `product`, which does bite |
-> | CMIC#167 | 「is `sample.ts` a demo path? if so the High drops」 | **Ruled the counter out** — it is the customer's own download |
-> | CMIC#165 r3 | 「look for an outer `en`, hoisting, or a path where the callback fires later」 | **Ruled all out**, then escalated a sibling Low → High |
+> 四次实测(严重度两个方向都动过)：见 `references/incidents.md#r4-falsification-measured`。
 >
 > A verdict round that only ratifies the earlier rounds is worth much less than one that tries to
 > break them. Also require R4 to **re-run the key mutation/experiment itself rather than inherit it**
@@ -711,9 +655,7 @@ R3: <Codex output compact, or "SKIPPED">
 
 > ⛔ **一个 PR 的「完成」= post + 投递（Step 6.6），不是 post。**（Jason 2026-08-27，当场发火）
 >
-> **发生了什么：** `CoLivingOS#214` post 完 + 入库完，我立刻跳去下一个 PR 的 R2 —— Step 6.6 一个字
-> 没做。#211/#212/#213 都发了，唯独这个漏了。我给自己的解释是「Step 6.6 排在 Step 6/7 之后，看着
-> 像收尾杂项，而下一个 PR 已经预备好在等」。**这个解释本身就是 bug 的形状**：6.6.2 那段注释早就
+> 这条闸门是怎么买来的：见 `references/incidents.md#deliver-gate-incident`。
 > 写着「一个『有时候不发』的规则，执行起来就会变成『经常忘了发』」，而我把它降级成了「有空再发」。
 >
 > **所以规则改成这样，不留判断余地：**
@@ -819,11 +761,7 @@ Always use `post_pr_review.sh` (PAT mode, no account switching). Never `gh pr re
 | `REQUEST_CHANGES` | **发**，内容见 6.6.3，并要求回信 |
 | `APPROVE`（**任何情况，包括首轮就过**） | **发**：结论 + head sha + 我实测验过的关键点 + **不要合并** |
 
-> **这一步不是可选的，也不是「有必要才发」。** 原来的规则给首轮 APPROVE 开了个「省噪音」的口子，
-> 而实际效果是**投递这一步整个被跳过而没人发现** —— 2026-08-26 实测：`CoLivingOS#185`
-> RC 了没发、`SuperPaymaster#375` RC 了没发、`DevLoop#2` APPROVE 了没发也没在汇报里
-> 写「无在跑会话」。三次里两次是**明确违反当时已有的规则**，一次是钻了那个口子。
-> 一个「有时候不发」的规则，执行起来就会变成「经常忘了发」。所以取消例外。
+> 为什么取消「首轮 APPROVE 不发」这个例外(三次实测漏发)：见 `references/incidents.md#always-deliver-no-exception`。
 >
 > ⛔ **没找到会话不等于这一步做完了。** 命中 0 个时，Step 8 的汇报里**必须**有一行
 > 「`<repo>` 无在跑会话 —— 未投递」，并告诉用户 `cd <repo 路径> && claude` 就能收。
@@ -1000,28 +938,14 @@ Rules:
 - The author of CMIC#167 hit this same trap independently the same day and wrote it into their own
   PR body: 「变异测试自己也需要先验证『变异真的生效了』—— 否则它会给出一个虚假的安心」.
 
-### Where R1 (DeepSeek-flash) actually pays (measured over ~10 rounds, 2026-08-06/07)
+### R1(DeepSeek-flash)的产出分布 —— 决定开跑前给它多少权重
 
-Roughly **4/25 findings** survived across a full session. The distribution is not uniform, and it
-tells you how much weight to give R1 before you start:
+约 **4/25** 条 finding 撑得住。分布极不均匀：**增量轮 + 喂了上一轮 findings 时最高(≈2/4)**，
+真实代码 diff 偶尔 1/3，**大 PR 首审 ≈0**，**纯文档 0/12(且会编造 file:line)**。
+两种退化形态认出来就行，不用去 debug：同一条 finding 报两个严重度；finding 自我否定后以「No issue」结尾。
 
-| Situation | R1 yield | Note |
-|---|---|---|
-| **Incremental round, `--prior-review` fed, prior findings ARE the subject** | best (≈2/4) | This is the one place it earns its slot — checking 「上一轮那条改干净没有」 |
-| Real code diff with new logic | occasional 1/3 | It hit a real `--write` anchor bug once |
-| First review of a large PR | ~0 | Missed a Critical, a High, and three Mediums across three PRs |
-| Pure-docs / long-document PRs | 0/12 | Worse: on a 1000-line doc **all three file:line anchors were fabricated** |
-
-Two recurring degradation shapes to recognize rather than debug:
-- **The same finding filed twice at two severities** (identical text at Medium and Low) — seen on
-  two consecutive PRs.
-- **A "finding" that self-refutes mid-sentence** and ends with 「No issue」 — it emitted its reasoning
-  as the finding.
-- On an incremental round, if R1's findings all name files the PR does not own, it diffed a
-  pre-rebase base — see the Step 0b short circuit.
-
-None of this licenses skipping R1 (constraint #5 is absolute). It licenses **not spending judgement
-rounds chasing it**: verify its findings cheaply, reject them with evidence, and move on.
+这**不**允许跳过 R1(constraint #5)，它允许的是**不为它花判断轮**：便宜地核一下、有证据地驳回、继续走。
+完整数据表与退化实例：见 `references/incidents.md#r1-yield-by-situation`。
 
 ### Credibility = mechanical evidence, not model count (HARD)
 
@@ -1048,15 +972,10 @@ steps, not as things to remember.
    `CoLivingOS#213` 的 force-push 恰好落在我 `gh pr view`(04:13:15Z) 和 post(04:30:37Z) 之间，
    GitHub 把 APPROVE 记在了新 head 上 —— 我批准了一棵没读过的树，最显眼那条发现对新树不成立，
    只能公开撤回。完整规程见 Step 6 开头那两条。
-   *(CMIC#175: I recorded a review against `1421fe0e` while my worktree held `ffde325`. The findings
-   happened to still hold, so it cost nothing — this time. If the push had landed after my fetch I'd
-   have reviewed stale content and reported it as current.)*
+   *(实例见 `references/incidents.md#habit-cmic-175-1050`)*
 
 2. **When a comment, PR body, or doc cites a test / guard / script, grep for it right then.**
-   *(CMIC#176: the justification for narrowing a **PII guard** was "`test:pii-guard` has a
-   counter-control". Whole-repo grep: one hit — the sentence itself. Narrowing a security guard on a
-   test that does not exist. This is the same shape as a pointer into something the consumer cannot
-   see.)*
+   *(实例见 `references/incidents.md#habit-cmic-176-1055`)*
    ⚠️ **A repo-wide miss is not yet a finding — the runner may live OUTSIDE the repo.** Before
    writing "cites a script that does not exist", also search `~/.claude/skills/`, `~/.claude/plugins/`,
    and anything else on the invoking `PATH`. *(CMIC#189: `acceptance.md:60` and `progress.md:45` both
@@ -1072,21 +991,13 @@ steps, not as things to remember.
    agreement, not truth — and "nobody updated any copy" satisfies agreement. When reviewing one, do
    not stop at "do contradictory copies go red"; also ask **"does an entire missing/absent entry go
    red"**, and require an *independent* source of truth (git log, the real table, the source file).
-   *(CMIC#175: I approved a 3-way ledger checker after 4/4 mutations went red — all of them
-   contradiction mutations. #176 then merged without updating any of the three, and it stayed green.
-   The author found it, not me.)*
+   *(实例见 `references/incidents.md#habit-cmic-175-1074`)*
 
 4. **Any count that goes into a conclusion gets computed two different ways first.**
-   *(CMIC#175: my first pass counted backtick-quoted table names as statuses and produced
-   `DONE=19/READY=1`; tightened to the valid status words it was `21/2`. Those numbers were going
-   into the review. Same night I rejected a subagent's "213 multi-line templates" — it was 0.)*
+   *(实例见 `references/incidents.md#habit-cmic-175-1079`)*
 
 5. **When the control case fails, suspect your measuring apparatus before the thing under test.**
-   *(CMIC#176: my first PII counter-control had all six cases pass, including the positive control —
-   which reads as "the guard is completely blind". Actual cause: `scan_files` uses `git ls-files` and
-   my probe was untracked, plus `ARCHIVE` is hardcoded. The PR author independently hit the other half
-   of the same trap — his probe email was filtered by the gate's own `*example*` rule. **A result that
-   says "everything is broken" is far more often a broken harness.**)*
+   *(实例见 `references/incidents.md#habit-cmic-176-1084`)*
 
 ### Feed full context to DeepSeek and Codex (HARD — their errors are context-starvation)
 
@@ -1095,15 +1006,11 @@ DeepSeek's false positives and Codex's "INSUFFICIENT_CONTEXT / can't fetch" are 
 - **Codex R3 (PK)**: pass the diff + the post-R2 findings + **the cross-layer source it must check** (e.g. both the SDK encoder and the on-chain/TA verifier, the op→flag mapping) inline. NEVER rely on Codex fetching the diff itself. Give it a concrete claim to refute and the evidence to refute it with.
   - 🔴 **Paste source VERBATIM — never hand-summarize a struct / domain / signature / type when feeding Codex.** Copy the exact lines from the file. If you retype or "simplify" a definition you WILL drop a field, and Codex will report a guaranteed false positive on the field you elided. (Proven: aastar-sdk#137 — I summarized an EIP-712 domain without its `chainId`; Codex immediately raised a bogus `[High]` cross-chain-replay finding. The field was in the actual code.) Whenever Codex flags a missing field/check, FIRST re-grep the real source before believing it — the omission is usually in your prompt, not the code.
 
-## v4 是既定管线 —— 别再跑 v4-vs-v3 评估（结案 2026-08-07）
+## v4 是既定管线（v4-vs-v3 评估已结案 2026-08-07）
 
-这里原本挂着一张 v4-vs-v3 对照表、一条「跑够 10 个 v4 PR 再评」的指令，和一条回滚扳机。
-**实测 v4 自 2026-06-19 起已经跑了 155 个 PR** —— 是它自己那个决策点的 15 倍，回滚从未发生。
-一个 15 倍过期的决策点不是待办事项，是每轮 review 都要读一遍的噪音，所以删掉。
-
-v4 就是当前管线。真要重新评估某一环，用它自己的口子：constraint #5 的 flash 评级
-（`model_eval_db.py provider-summary --provider deepseek --model deepseek-v4-flash`）和
-下面的 triage 审计。回滚脚本仍在 `SKILL.md.bak-v3-20260619`，需要时自己 `cp`。
+别再跑 v4-vs-v3 对照。要重评某一环用它自己的口子：constraint #5 的 flash 评级
+(`model_eval_db.py provider-summary --provider deepseek --model deepseek-v4-flash`)和下面的 triage 审计。
+回滚脚本在 `SKILL.md.bak-v3-20260619`。结案理由：见 `references/incidents.md#v4-vs-v3-closed`。
 
 ## Triage validation (run periodically)
 
