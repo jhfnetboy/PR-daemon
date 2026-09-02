@@ -587,8 +587,14 @@ Codex challenges Opus R2's Medium+ findings (not R1 findings directly).
 > OUT=<codex_pk.sh 的输出文件>
 > echo "  bytes=$(wc -c <"$OUT" | tr -d ' ')"            # 判据①：非空
 > grep -icE "gpt-5|codex" "$OUT"                          # 判据②：产物自报是 Codex
-> grep -icE "deepseek|kimi|glm" "$OUT"                    # 反向：命中即说明这是兜底
+> head -1 "$OUT"                                          # 判据③：谁真的跑了(见下)
 > ```
+>
+> ⚠️ **判据③只看首行，绝不要 `grep "deepseek" "$OUT"` 扫全文。**（2026-09-02 实测误报，
+> SuperPaymaster#416：产物里包含 **prompt 回显**，我 prompt 里那句「DeepSeek claimed…」
+> 让反向判据命中，差一步把一次真 Codex 记成兜底。）`codex_pk.sh` 的首行**就是为此存在的**——
+> 它的脚本头写着「The first line of the output names the challenger that actually ran」，
+> 形如 `CHALLENGER: codex` 或 `CHALLENGER: deepseek`。**以那一行为准。**
 >
 > - **两格都过** → 这一轮是真 Codex，照常写 `R3 Codex: CHALLENGE/CONFIRM …`
 > - **①空** → 记 `R3 未跑 — 空产物`，**不要**写成「Codex 没有异议」。
