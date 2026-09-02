@@ -87,6 +87,14 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-sync", action="store_true", help="只查 SQLite,不去 GitHub 拉")
     ap.add_argument("--max", type=int, default=200)
+    ap.add_argument(
+        "--only",
+        action="append",
+        default=[],
+        metavar="SUBSTR",
+        help="只把匹配的仓库算作待审(可重复)。被滤掉的仍然计数并打印出来 —— "
+        "一个把结果藏起来的过滤器和一个「真没活」的扫描不能长得一样。",
+    )
     a = ap.parse_args()
 
     ok = True if a.no_sync else sync(a.max)
@@ -96,12 +104,29 @@ def main() -> int:
     if not ok:
         print("FETCH_FAILED — 下面这份是上一次同步的快照,不代表现在。不要据此判定「无待审」。")
 
-    for repo, n, head, rev, why, title in work:
+    def keep(repo: str) -> bool:
+        return not a.only or any(s.lower() in repo.lower() for s in a.only)
+
+    shown = [w for w in work if keep(w[0])]
+    filtered = [w for w in work if not keep(w[0])]
+
+    for repo, n, head, rev, why, title in shown:
         print(f"★ {repo}#{n}  {why}  cur={head[:12]} rev={rev[:12] or '<无>'}  {title[:44]}")
     for repo, n, head, rev, why, title in drafts:
-        print(f"· (draft,跳过) {repo}#{n}  {title[:44]}")
+        if keep(repo):
+            print(f"· (draft,跳过) {repo}#{n}  {title[:44]}")
 
-    print(f"open={len(rows)} 已完成={done} 待审={len(work)} draft={len(drafts)}"
+    # A filter that hides rows must still say how many it hid. Otherwise "待审=0"
+    # under --only and "待审=0" with nothing to do print the same thing, and the
+    # scope restriction silently becomes a coverage gap.
+    if filtered:
+        print(f"· (--only 之外,今晚不管) {len(filtered)} 个: "
+              + ", ".join(f"{r}#{n}" for r, n, *_ in filtered[:6])
+              + (" …" if len(filtered) > 6 else ""))
+
+    print(f"open={len(rows)} 已完成={done} 待审={len(shown)}"
+          f"{f'(+{len(filtered)} 被 --only 滤掉)' if filtered else ''}"
+          f" draft={sum(1 for d in drafts if keep(d[0]))}"
           f"{'' if ok else '  ⚠️ FETCH_FAILED'}")
     return 0 if ok else 1
 
