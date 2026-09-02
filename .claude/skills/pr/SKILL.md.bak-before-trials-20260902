@@ -344,35 +344,6 @@ Map each issue DoD item against the diff. Include in the review:
 ```
 Skip this section entirely for trivial docs/chore PRs with no linked issue.
 
-## Step 2.6 — 写死这个 PR 的**意图**，一句话（🧪 试用 T1，2026-09-02 加）
-
-> 🧪 **这是一条试用中的步骤。** 每次 review 的自评块要给它记一行（命中/空转/碍事），
-> 结案规则与证伪判据写在 `references/trials.md#t1`。**默认结局是删除** ——
-> 攒够数据之前它不算既定管线的一部分。
-
-在跑 R1 之前，先写下一句：**「作者想达成的是 X。」** 这句话进 review 正文（可以只有一行）。
-
-它的用处只有一个，但那个用处每天都在发生：**把「阻塞项还是注记」从手感变成机械判断。**
-
-```
-diff 没达成 intent          → 阻塞项（REQUEST_CHANGES 的正当理由）
-intent 本身比问题域窄        → 注记（「指出差距」，不是「要求扩大范围」）
-```
-
-⚠️ **reviewer 挑的是「有没有达成意图」，不是「意图对不对」。**
-作者说「这个 PR 只接两处、其余后续」是一个**合法的意图**；
-「docstring 说全仓九处而实现只有两处」才是没达成意图 —— 差的是**声明与实现不一致**，
-不是「你应该把九处都做完」。这两者今天分错过好几次，全靠临场想。
-
-⛔ **意图不许直接抄 PR 标题。** 抄标题说明这一步没有产出独立信息，
-按 T1 的证伪判据这就是它该被删掉的证据之一 —— 如实记「空转」。
-意图要能从 **PR body + 关联 issue + diff 实际动了什么** 三者交叉读出来，
-三者不一致本身就是第一条 finding。
-
-（实例：`CoLivingOS#272` 的意图是「把日历上不存在的日期挡在入口」，
-而 diff 只接了 2/9 处 —— 按上面这条分档，**「只做两处」不是问题，
-「docstring 说通则」才是**，所以要的是补一段范围说明，不是把九处都修完。）
-
 ## Step 3 — R1: DeepSeek dual-pass (parallel)
 
 Run both passes simultaneously. R1a is the full mechanical pass; R1b is a focused security lens.
@@ -577,30 +548,6 @@ else (all Low / suggestions only):
 ### R3 — Codex PK (Medium+ findings only, targeted hunks)
 
 Codex challenges Opus R2's Medium+ findings (not R1 findings directly).
-
-> 🧪 **R3 产物的机械核验（试用 T2，2026-09-02 加）。**
-> 结案规则与证伪判据：`references/trials.md#t2`。**默认结局是删除。**
->
-> `codex_pk.sh` 跑完之后、**在读它的内容之前**，先跑这两格判据：
->
-> ```bash
-> OUT=<codex_pk.sh 的输出文件>
-> echo "  bytes=$(wc -c <"$OUT" | tr -d ' ')"            # 判据①：非空
-> grep -icE "gpt-5|codex" "$OUT"                          # 判据②：产物自报是 Codex
-> grep -icE "deepseek|kimi|glm" "$OUT"                    # 反向：命中即说明这是兜底
-> ```
->
-> - **两格都过** → 这一轮是真 Codex，照常写 `R3 Codex: CHALLENGE/CONFIRM …`
-> - **①空** → 记 `R3 未跑 — 空产物`，**不要**写成「Codex 没有异议」。
->   空文件与「跑了但没意见」读起来一模一样，而 `exit 143` + 空 stderr 正是超时的形状。
-> - **②未命中或反向命中** → 这是**兜底链**（DeepSeek/Opus），必须原样标注
->   `R3 兜底(deepseek) — Codex 不可用`。**兜底的输出永远不许被称作 Codex。**
->
-> 为什么值得单开一步而不是靠记得：这两种失败的**外观**都是「一份没有异议的 R3」，
-> 而下一步的自然反应是继续走 R4 并在自评里写「Codex CONFIRM」。
-> 判据放在读内容**之前**，是因为读完内容之后我会开始相信它。
-
-
 
 > **Headless/daemon runs — invoke Codex via `bash scripts/codex_pk.sh` directly, NOT
 > `Agent(codex:codex-rescue)`.** The Agent path spawns internal Bash that a restrictive permission
@@ -1156,14 +1103,8 @@ After posting the verdict for a PR, the **chat reply** must close with a compact
 - 机械证据: <列实跑的工具命令 + 结果，如 "cast call gToken()→canonical ✓">  | 或 "无 — 应补"
 - **DeepSeek flash 评级**: <1-5> — <一句话：这轮它的 finding 有没有站得住？假阳性？漏了什么后面轮次/我自己抓到的？>
   一句话改进建议(如有): <prompt 更紧/喂更多 context/diff 范围更窄 等>
-- **我驳回了哪些 finding**（🧪 试用 T3）: <逐条：谁提的 · 它说什么 · 我凭什么拒 · 我**跑了什么**才敢拒>
-  | 或 `无可驳回 — <一句话：这轮子模型/Codex 的 finding 全部成立>`
 - 与 skill 设计是否一致: <一致 / 偏差点>
 - 改进建议: <若我偷工 → 怎么补; 若 skill 本身该改 → 具体改什么>
-- **🧪 试用项记录**（每条一行，记号只用 命中/空转/碍事/未执行/N-A；同步写进 `references/trials.md`）:
-  · T1 意图: <记号> — <证据>
-  · T2 R3产物核验: <记号> — <证据>
-  · T3 驳回清单: <记号> — <证据>
 ```
 
 Rules for the self-assessment:
@@ -1171,21 +1112,4 @@ Rules for the self-assessment:
 - **R1 DeepSeek has exactly TWO allowed skips** (pure-docs/ledger PR; increment that only fixes your own prior findings — see ABSOLUTE CONSTRAINT #5). Naming the exemption is required: write `R1 未跑 — 纯文档` or `R1 未跑 — 增量=修我自己上一轮的 findings`. **Any other reason is not a reason** — if you are about to write "R1 未跑" for a real code diff, stop and go run it before finishing the review.
 - If the round count or model usage **deviated from what the triage required**, the self-assessment must state the deviation AND the corrective action (run it now / re-review).
 - If the deviation reveals a **skill-process problem** (e.g. a step that's unrealistic, or context that should be auto-fed), include a concrete **skill-improvement recommendation** here, and offer to edit the skill.
-
-### 🧪 试用项那三行怎么记（2026-09-02 加，Jason 指定）
-
-新加的 skill 步骤先按**试用**处理，不当既定管线：每次 review 记一行，攒够了再结案。
-完整的假设 / 证伪判据 / 结案规则在 `references/trials.md`。
-
-- **记号只用五个**：`命中`（因为它我做了/发现了原本不会的事，且写得出是什么）、
-  `空转`（照做了但结论一个字没变）、`碍事`（花了时间还把注意力引开，或逼出错误结论）、
-  `未执行`（我没照做 —— 这不是空转，要写为什么）、`N/A`（这一轮结构上不适用，如 2-round 不跑 R3）。
-- ⛔ **必须能记成负面。** 一条试用项如果从加进来到结案**从没被记过「空转」**，
-  那不是它有多好，是这一栏在敷衍 —— 结案时按敷衍处理，直接删。
-  **举证责任在这条规则身上，不在删它的人身上。**
-- ⛔ **同一轮里同时写进 `references/trials.md` 的观测表**（日期 · PR · 记号 · 一句话证据）。
-  只写在聊天里的记录活不过这个 session。
-- **到达结案条件时（次数满 或 到期日）**：当轮 review 收尾时必须给出结论
-  —— `保留` / `删除` / `微调(具体改什么判据)` —— 把整节搬进 `trials.md` 的「已结案」，
-  并**当场改 SKILL.md**。不许写「再观察观察」：那等于默认保留，而默认应当是删除。
 - This block is part of the terse chat reply [[feedback_terse_chat_output]] — keep it compact, but it is the one place where listing per-round/per-model detail is REQUIRED (not "see PR comment").
