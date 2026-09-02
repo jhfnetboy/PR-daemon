@@ -104,7 +104,18 @@ if [ -n "$REVIEW_TOKEN" ]; then
   # below. Failure modes trade in the right direction — worst case becomes "posted by the
   # wrong account and told about it loudly", instead of "correct review silently not
   # posted, on an endpoint that was never even asked".
-  ACTIVE_USER="$(GH_TOKEN="$REVIEW_TOKEN" gh api user -q .login 2>/dev/null || true)"
+  # Two guards, because neither alone is enough:
+  #   1. rc — `gh api ... -q .login` prints the raw ERROR BODY to *stdout* and exits 1 on a 5xx,
+  #      so `$(... || true)` yields a non-empty string that is not a login. Swallowing rc while
+  #      keeping stdout is what turned "preflight unreachable" into "token belongs to {"message":
+  #      "No server is currently available…"}, expected clestons" — a hard failure again.
+  #   2. shape — a GitHub login is [A-Za-z0-9-]{1,39}. Belt and braces in case some future gh
+  #      version exits 0 while emitting something that is not a login.
+  if ACTIVE_USER="$(GH_TOKEN="$REVIEW_TOKEN" gh api user -q .login 2>/dev/null)"; then :; else ACTIVE_USER=""; fi
+  case "$ACTIVE_USER" in
+    "" ) ;;
+    *[!A-Za-z0-9-]* | ????????????????????????????????????????* ) ACTIVE_USER="" ;;
+  esac
   if [ -n "$ACTIVE_USER" ] && [ "$ACTIVE_USER" != "$EXPECTED_USER" ]; then
     echo "Review token belongs to $ACTIVE_USER, expected $EXPECTED_USER." >&2
     exit 1

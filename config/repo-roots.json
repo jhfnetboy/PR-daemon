@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-06-05",
+  "updated_at": "2026-08-08",
   "roots": [
     {
       "owner": "AAStarCommunity",
@@ -8,8 +8,8 @@
       "path": "~/Dev/aastar"
     },
     {
-      "owner": "AuraAI",
-      "aliases": ["auraai", "AuraAI"],
+      "owner": "iDoris-ai",
+      "aliases": ["idoris-ai", "auraai", "AuraAI", "AuraAIHQ"],
       "path": "~/Dev/auraai"
     },
     {
