@@ -75,6 +75,17 @@ one to tell the user about.
 > 当时测到了什么、它替换掉了什么、怎么回滚,都在那里,由正文里的 `references/incidents.md#<锚>` 指过去。
 > **规则一字未动,只是搬了家**(2026-08-28 重构;`SKILL.md.bak-before-placement-20260828` 是重构前的全文)。
 > 执行时不需要读档案;要判断「这条规则还成不成立 / 能不能改」时再去读。
+>
+> 📁 **`references/` 下现在有三份,分工不同,执行时都不读:**
+> - `incidents.md` —— 每条规则是哪次事故买来的(**规则的来历**)
+> - `trials.md` —— 在试用中的改动 + 证伪判据 + 结案规则(**规则的入口**)
+> - `regressions.md` —— **带已知正确答案的量具事故题库**(**规则的门禁**)。
+>   一条试用项要留下,必须让题库里某道题的答案变对、或带来一道新题;自评不算数。
+>   它同时是一张**覆盖图**:每道题的「谁拦得住」为空 = 一个已知会发生、而规则里没人认领的失效模式。
+>
+> ⚠️ **执行 review 时读这些档案是有害的,不只是没必要。** WikiSkill 那篇用消融实验量过:
+> 执行者能读知识库时性能反而下降(63.7%→60.9%),因为会去**套结论**而不是真跑探针。
+> 我们这边的同一件事:「这看起来像 CoLivingOS 那次」不是判断,**重跑当初找到它的那个探针**才是。
 
 > ⛔ **ABSOLUTE CONSTRAINT #1 — Review only, NEVER merge**
 > Pure reviewer. NEVER merge any PR regardless of author (human or bot).
