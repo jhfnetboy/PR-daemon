@@ -106,6 +106,7 @@ SKILL.md 一直在长（1114 行），**每一条都是某次事故买来的，�
 | 2026-09-02 | Agent24#147 | 命中 | 意图=「给入站通路一个**正向**活性信号」→ 据此把「抖动走不到」判为**阻塞**(它正是那个正向信号能不能长期成立的前提),而把 body 的计数小差(249 vs 252)判为注记 |
 | 2026-09-03 | Agent24#147 r3 | 命中 | 复审的意图=「让探针既能真发现死亡、又不自己制造洪水/假警报」→ 据此把「正文测试计数 252 现在应是 256」判为**注记**(不影响那个意图),而 `beat` 里新加的提前拉是否会饥饿则落在意图之内,必须变异验证 |
 | 2026-09-03 | AgentEar#31 | 命中 | 意图=「下游投递无论怎么失败都不能挡住上屏、也不能让记录丢掉」→ 据此把「`write_route` 的守卫没测试」判为**注记**(守卫今天是对的,意图达成了;丢的是将来被重构掉时没人喊),而不是阻塞。没有这一步我会因为它是 path-escape 相关就往 Medium 上抬 |
+| 2026-09-03 | AgentEar#33 | 命中 | 意图=「没装 LLM 的用户明说了『这是一个 idea』,kb 里就该真的多一篇」→ 据此判定「`finish()` 那一步没有判据」是**注记不是阻塞**:行为今天是对的(我从 `explicit_only` 探到 `should_deliver` 五个输入全对),意图达成了;缺的是将来被改坏时没人喊。作者直接问「该不该阻塞发版」,靠这条才答得干脆 |
 
 ---
 
@@ -144,6 +145,7 @@ SKILL.md 一直在长（1114 行），**每一条都是某次事故买来的，�
 | 2026-09-02 | CoLivingOS#277 | N/A | 2-round，未跑 R3 |
 | 2026-09-02 | Agent24#147 | **命中(第一次真抓到降级)** | `codex_pk.sh` 首行是 `CHALLENGER: deepseek-fallback (codex hung/failed 1x)`,那份连源码都读不了、CONFIRM 只是复述我给的事实。**先读内容的话我会在 review 里写「Codex CONFIRM」**。加大 stall 重跑才拿到真 Codex(首行 `CHALLENGER: codex`,行号 775/487),而真 Codex 补出了一条比我更严重的运行时缺陷 |
 | 2026-09-03 | AgentEar#31 | N/A | 本会话不起子代理,R3 未跑 |
+| 2026-09-03 | AgentEar#33 | N/A | 同上 |
 
 ---
 
@@ -174,6 +176,7 @@ SKILL.md 一直在长（1114 行），**每一条都是某次事故买来的，�
 | 2026-09-02 | Agent24#147 | 命中 | R1 七条全驳,每条都跑了东西才敢拒:`durationMs` 读实现确认只是 `Number()`+clamp(命名别扭非缺陷)、tmp 泄漏在 `:788` catch 里就清了、identity 在 `config.ts:98` 有字符集替换 |
 | 2026-09-03 | Agent24#147 r3 | 命中 | R1a 2 条:驳「`expire()` 会抢在 `hasOverdueCanary` 前删掉过期项」是去把两个阈值各自读成数字才敢拒(`staleAfterMs`=interval×3=15min vs `overdueAfterMs`=max(60s,2×tick)=60s,可加速区间宽 14 分钟);另一条「`deliver` 参数没用上」成立但源码已自标 `Reserved:`,降为 nit |
 | 2026-09-03 | AgentEar#31 | 命中 | R1a+R1b 六条全驳。驳「`store.root()` 应改 `&data_root`」是去读了 `Store::open` 那三行(原样存参数)才敢拒 —— **两个表达式是同一个值**,不是「取决于配置会写到别处」;另五条是同一个 `front_matter_id` nit 重复五次(skill 记过的退化形态),降级前先确认了它只读我们自己写的文档做去重、不参与渲染 |
+| 2026-09-03 | AgentEar#33 | 命中 | R1 两条全驳:`"?"` 那条去读 `first_clause` 确认窗口已截到第一个分句标点(含 `?` 本身),而它自己写了「first_clause already limits scope, verify intent」—— 那就是没验;`Source::None` 那条查了 enum 只有两个变体、且既有 `Classifier::classify` 也落 `Model`,本 PR 没引入新的不一致 |
 
 ---
 
