@@ -864,23 +864,6 @@ Always use `post_pr_review.sh` (PAT mode, no account switching). Never `gh pr re
 
 bot PR（dependabot / renovate）→ 跳过本步，走 `$pr-fix` 内部闭环。
 
-### 6.6.2b ⛔ 「发了没有」必须是一格可核对的痕迹（Jason 2026-09-05 当场要求）
-
-**Step 8 的汇报里必须有一行 `交接:`，三选一，不许省略、不许含糊：**
-
-```
-交接: ✅ 已发 <会话名>  (msg_id=<SendMessage 返回的 id>)
-交接: ⚠️ 无在跑会话 —— 未投递（<repo> 起一个就能收: cd <路径> && claude）
-交接: ⚠️ 命中多个 —— 未投递，候选: <名字 [ref]> …
-```
-
-**判据是 `SendMessage` 的返回值，不是我的记忆。** `msg_id` 是它返回的，写不出 `msg_id`
-就等于没发 —— 这一格的全部意义是让「发了」和「以为发了」在汇报上长得不一样。
-
-⛔ **post 之后、record-run 之前，先 `ListAgents` 再 `SendMessage`。** Step 6 开头那条
-「下一个动作只能是 ListAgents」说的是顺序，这一条说的是**留痕**：没有 `msg_id`（或那两行
-未投递说明）就不许进 Step 7。
-
 ### 6.6.3 消息内容契约
 
 `SendMessage({to: "<会话名>", summary: "<repo>#<N> <verdict>", message: ..., notify_when_idle: true})`
@@ -1168,7 +1151,6 @@ python3 /Users/jason/Dev/tools/PR-Daemon/scripts/triage_db.py report
 [ ] scored DeepSeek R1a+R1b separately in model_eval_db
 [ ] printed per-PR v4 eval delta (R1 confirmation rate, Opus R2 independent findings)
 [ ] updated pr_watch_targets in SQLite
-[ ] **交接留痕**：Step 8 汇报里那行 `交接:` 写了 `msg_id`，或写明「无在跑会话 —— 未投递」（6.6.2b）
 [ ] Step 6.6: **无论 APPROVE 还是 REQUEST_CHANGES 都要发**（6.6.2，无例外）。ListAgents 找原仓库会话 → 命中 1 个才发；发了要带回信地址+回信要求；**消息里不许写「不要合并」**（那是我自己的约束，不转发给别人）；**命中 0 个必须在 Step 8 汇报里写明「无在跑会话 —— 未投递」**
 ```
 
@@ -1213,8 +1195,6 @@ After posting the verdict for a PR, the **chat reply** must close with a compact
 - 与 skill 设计是否一致: <一致 / 偏差点>
 - 改进建议: <若我偷工 → 怎么补; 若 skill 本身该改 → 具体改什么>
 - **🧪 试用项记录**（每条一行，记号只用 命中/空转/碍事/未执行/N-A；同步写进 `references/trials.md`）:
-- **交接**: `✅ 已发 <会话名> msg_id=<id>` / `⚠️ 无在跑会话 —— 未投递` / `⚠️ 命中多个 —— 未投递`
-  （写不出 msg_id = 没发。这一行不许省。）
   · T1 意图: <记号> — <证据>
   · T2 R3产物核验: <记号> — <证据>
   · T3 驳回清单: <记号> — <证据>
